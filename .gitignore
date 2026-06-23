@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Editor / temp (note: do NOT use "*~" — it would also ignore the Documentation~ folder)
+*.swp
+*.tmp
+
+# NOTE: Unity .meta files are intentionally NOT ignored.
+# This repo is a UPM package; .meta files must be committed so asset GUIDs
+# stay stable when the package is loaded into a project.
+
+# Captures produced while testing (don't commit large traces)
+*.gputrace/
+Captures/

@@ -1,0 +1,22 @@
+{
+    "name": "JeminLee.MetalGpuCaptureSkill.Editor",
+    "rootNamespace": "JeminLee.MetalGpuCaptureSkill.Editor",
+    "references": [],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.ai.assistant",
+            "expression": "",
+            "define": "METAL_GPU_CAPTURE_ASSISTANT_PRESENT"
+        }
+    ],
+    "noEngineReferences": false
+}
