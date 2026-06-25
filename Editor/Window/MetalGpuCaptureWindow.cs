@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
@@ -9,11 +10,13 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 {
     /// <summary>
     /// Entry point A: human-driven dockable window.
-    /// Step 1 = environment. Step 2 = build + capture. Step 3 = minimal results (CPU/GPU frame time
-    /// + top GPU pass). AI section is added in a later step.
+    /// Step 1 = environment. Step 2 = build + capture. Step 3 = minimal results.
+    /// Step 5 = "Ask AI Assistant for insights" (programmatic AssistantApi + clipboard/menu fallback).
     /// </summary>
     public class MetalGpuCaptureWindow : EditorWindow
     {
+        const string AssistantMenuItem = "Window/AI/Assistant";
+
         VisualElement _envContainer;
         Label _lastBuildLabel;
         RadioButtonGroup _buildMode;
@@ -24,19 +27,21 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         Label _statusLabel;
         TextField _traceField;
         Button _inspectBtn;
+        Button _askAiBtn;
         VisualElement _resultsContainer;
         ScrollView _logScroll;
         Label _logLabel;
 
         string _existingBuild;
         bool _busy;
+        MetalTraceSummary _lastSummary;
 
         [MenuItem("Window/Analysis/Metal GPU Capture")]
         public static void Open()
         {
             MetalGpuCaptureWindow w = GetWindow<MetalGpuCaptureWindow>();
             w.titleContent = new GUIContent("Metal GPU Capture");
-            w.minSize = new Vector2(480, 560);
+            w.minSize = new Vector2(480, 600);
             w.Show();
         }
 
@@ -107,10 +112,18 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _traceField.style.marginTop = 4;
             root.Add(_traceField);
 
+            VisualElement resultBtns = Row();
+            resultBtns.style.marginTop = 4;
             _inspectBtn = new Button(OnInspectClicked) { text = "Inspect trace" };
-            _inspectBtn.style.marginTop = 4;
+            _inspectBtn.style.flexGrow = 1;
             _inspectBtn.style.height = 24;
-            root.Add(_inspectBtn);
+            resultBtns.Add(_inspectBtn);
+            _askAiBtn = new Button(OnAskAiClicked) { text = "Ask AI Assistant for insights" };
+            _askAiBtn.style.flexGrow = 1;
+            _askAiBtn.style.height = 24;
+            _askAiBtn.style.marginLeft = 4;
+            resultBtns.Add(_askAiBtn);
+            root.Add(resultBtns);
 
             _resultsContainer = new VisualElement();
             _resultsContainer.style.marginTop = 6;
@@ -132,6 +145,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
             RefreshEnvironment();
             RefreshBuildSection();
+            UpdateAskAiEnabled();
         }
 
         // ---------- Environment ----------
@@ -219,7 +233,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
                 _statusLabel.text = "Capturing...";
                 int warm = Mathf.Max(0, _warmup.value);
-                MetalCaptureResult cap = await MetalCaptureService.CaptureAsync(appPath, warm, _waitSignal.value, AppendLog);
+                MetalCaptureResult cap = await MetalCaptureService.CaptureAsync(appPath, warm, _waitSignal.value, AppendLog).ConfigureAwait(true);
 
                 if (cap.success)
                 {
@@ -251,9 +265,90 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         async Task InspectAndShow(string tracePath)
         {
             _statusLabel.text = "Inspecting trace...";
-            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog);
+            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog).ConfigureAwait(true);
+            _lastSummary = sum;
             ShowResults(sum);
+            UpdateAskAiEnabled();
             _statusLabel.text = sum.success ? "Inspection complete." : ("Inspection failed: " + sum.error);
+        }
+
+        // ---------- Ask AI Assistant ----------
+        async void OnAskAiClicked()
+        {
+            string tracePath = _traceField.value;
+            if (string.IsNullOrEmpty(tracePath))
+            {
+                _statusLabel.text = "No trace to analyze. Capture or set a .gputrace path first.";
+                return;
+            }
+
+            string prompt = BuildInsightPrompt(tracePath, _lastSummary);
+            bool launched = false;
+
+#if METAL_GPU_CAPTURE_ASSISTANT_PRESENT
+            try
+            {
+                var ctx = new Unity.AI.Assistant.Editor.Api.AssistantApi.AttachedContext();
+                if (_lastSummary != null && _lastSummary.success)
+                {
+                    string json = JsonUtility.ToJson(_lastSummary);
+                    ctx.Add(new Unity.AI.Assistant.VirtualAttachment(
+                        payload: json,
+                        type: "MetalTraceSummary",
+                        displayName: "Metal GPU Trace Summary",
+                        metadata: null));
+                }
+
+                AppendLog("Opening AI Assistant with prefilled insight prompt...");
+                // Show a prompt popup anchored to this window so the user can review/submit.
+                await Unity.AI.Assistant.Editor.Api.AssistantApi.PromptThenRun(rootVisualElement, prompt, ctx).ConfigureAwait(true);
+                launched = true;
+            }
+            catch (Exception e)
+            {
+                AppendLog("Programmatic Assistant launch failed: " + e.Message);
+            }
+#endif
+
+            if (!launched)
+            {
+                EditorGUIUtility.systemCopyBuffer = prompt;
+                AppendLog("Insight prompt copied to clipboard.");
+                bool open = EditorUtility.DisplayDialog(
+                    "Metal GPU Capture",
+                    "The insight prompt has been copied to your clipboard.\n\nOpen the AI Assistant window and paste it to get URP-focused optimization insights?",
+                    "Open Assistant", "Cancel");
+                if (open)
+                {
+                    if (!EditorApplication.ExecuteMenuItem(AssistantMenuItem))
+                        _statusLabel.text = "Could not open the AI Assistant (" + AssistantMenuItem + ").";
+                }
+            }
+        }
+
+        string BuildInsightPrompt(string tracePath, MetalTraceSummary s)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Analyze this captured Metal GPU frame and give URP-focused optimization insights, prioritized by impact.");
+            sb.AppendLine("Run the interpret-gpu-trace skill (tool Metal_InspectTrace) on this trace file:");
+            sb.AppendLine(tracePath);
+            if (s != null && s.success)
+            {
+                sb.AppendLine();
+                sb.AppendLine(string.Format(
+                    "Known summary: device {0}; {1} command buffers, {2} encoders, {3} draw calls.",
+                    s.device, s.commandBufferCount, s.encoderCount, s.drawCallCount));
+                if (s.topPass != null)
+                    sb.AppendLine(string.Format("Top pass by draw count: {0} ({1} draws).", s.topPass.label, s.topPass.drawCount));
+                sb.AppendLine("Note: gpudebug v1.0 exposes no per-pass GPU timing; reason about cost from draw counts plus URP pass/shader/material context, not measured milliseconds.");
+            }
+            return sb.ToString();
+        }
+
+        void UpdateAskAiEnabled()
+        {
+            if (_askAiBtn == null) return;
+            _askAiBtn.SetEnabled(!_busy && !string.IsNullOrEmpty(_traceField != null ? _traceField.value : null));
         }
 
         void ShowResults(MetalTraceSummary s)
@@ -327,6 +422,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (_captureBtn != null) { _captureBtn.SetEnabled(!busy); _captureBtn.text = busy ? "Working..." : "Capture frame"; }
             if (_inspectBtn != null) _inspectBtn.SetEnabled(!busy);
             if (_recheckBtn != null) _recheckBtn.SetEnabled(!busy);
+            UpdateAskAiEnabled();
         }
 
         // ---------- Log helpers ----------

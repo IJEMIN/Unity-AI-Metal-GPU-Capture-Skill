@@ -3,7 +3,8 @@
     "rootNamespace": "JeminLee.MetalGpuCaptureSkill.Editor",
     "references": [
         "Unity.AI.MCP.Editor",
-        "Unity.AI.Assistant.API.Editor"
+        "Unity.AI.Assistant.API.Editor",
+        "Unity.AI.Assistant.Runtime"
     ],
     "includePlatforms": [
         "Editor"
