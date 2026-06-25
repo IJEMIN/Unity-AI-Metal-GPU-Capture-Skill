@@ -1,7 +1,10 @@
 {
     "name": "JeminLee.MetalGpuCaptureSkill.Editor",
     "rootNamespace": "JeminLee.MetalGpuCaptureSkill.Editor",
-    "references": [],
+    "references": [
+        "Unity.AI.MCP.Editor",
+        "Unity.AI.Assistant.API.Editor"
+    ],
     "includePlatforms": [
         "Editor"
     ],

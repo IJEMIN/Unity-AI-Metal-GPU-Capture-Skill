@@ -12,3 +12,4 @@
 # Captures produced while testing (don't commit large traces)
 *.gputrace/
 Captures/
+Captures.meta

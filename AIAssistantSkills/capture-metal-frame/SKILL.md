@@ -1,43 +1,53 @@
 ---
 name: capture-metal-frame
-description: Build (or reuse) a macOS Standalone Metal Development Build of the current Unity project, or attach to an already-running build, and capture a .gputrace frame using macOS 27 gpucapture.
+description: Build (or reuse) a macOS Standalone Metal Development Build of the current Unity project, then launch it and capture a .gputrace frame using macOS 27 gpucapture. Pair with interpret-gpu-trace to analyze the result.
 required_packages:
-  - com.unity.ai.assistant
-required_editor_version: 6000.0
-enabled: false
+  com.unity.ai.assistant: ">=2.0.0"
+required_editor_version: ">=6000.0.0"
+enabled: true
 tools:
-  - Metal.CheckCaptureEnvironment
-  - Metal.FindExistingBuild
-  - Metal.BuildStandalonePlayer
-  - Metal.CaptureStandalonePlayer
+  - Metal_CheckCaptureEnvironment
+  - Metal_FindExistingBuild
+  - Metal_BuildStandalonePlayer
+  - Metal_CaptureStandalonePlayer
 ---
 
 # Capture a Metal GPU frame
 
-> SCAFFOLD — body to be authored with the Unity AI Assistant. `enabled: false` until ready.
+Capture a Metal GPU frame from this Unity project's macOS Standalone Player for performance
+analysis. Pair with `interpret-gpu-trace` to analyze the resulting `.gputrace`.
 
 ## When to use
-Use this skill when the user wants to capture a Metal GPU frame from this Unity project on macOS
-for performance analysis. Pair with `interpret-gpu-trace` to analyze the result.
+Use when the user wants to capture a Metal GPU frame from this Unity project on macOS (e.g. "capture
+a GPU frame", "profile the GPU", "grab a gputrace"). macOS Standalone Player (Metal) only.
 
-## Capture flow (v1)
-1. **Preflight** — run `Metal.CheckCaptureEnvironment` (macOS 27, `gpucapture`/`gpudebug` on PATH,
-   active graphics API is Metal).
-2. **Find or build** — `Metal.FindExistingBuild` locates the last macOS Standalone build. Ask the
-   user **reuse vs. rebuild**. If rebuilding, `Metal.BuildStandalonePlayer` produces a
-   capture-enabled macOS **Development Build** (Metal API).
-3. **Capture** — `Metal.CaptureStandalonePlayer` launches the player with `MTL_CAPTURE_ENABLED=1`,
-   waits (~10s) for the first frames, then attaches `gpucapture` and captures a `.gputrace`.
+## Capture flow
+1. **Preflight** — call `Metal_CheckCaptureEnvironment`. It verifies macOS major >= 27,
+   `/usr/bin/gpucapture` and `/usr/bin/gpudebug` exist, and the active graphics API is Metal (Editor
+   device + StandaloneOSX build setting). If any check fails, report it and stop.
+2. **Find or build** — call `Metal_FindExistingBuild`.
+   - If `exists` is true, ask the user **reuse vs. rebuild**.
+   - If it returns no build, or the user wants a fresh one, call `Metal_BuildStandalonePlayer`
+     (capture-enabled macOS **Development Build**, Metal). This is **blocking and can take a long
+     time** — tell the user before starting.
+3. **Capture** — call `Metal_CaptureStandalonePlayer` with the `.app` `appPath` from step 2
+   (omit `appPath` to reuse the last build). It launches the player with `MTL_CAPTURE_ENABLED=1`,
+   waits `warmupSeconds` (default 10) for a representative frame, then captures via gpucapture:
+   a single-frame boundary capture (`-b 0 -c 1`) with an automatic `--until-exit` + `stop` fallback.
+   - For players that exit too quickly to attach, set `waitForSignal: true`
+     (adds `MTLCAPTURE_WAIT_FOR_SIGNAL=1`).
+   - On success it returns the `.gputrace` path (written under the package's gitignored `Captures/`).
 
 ## Scope
-- In scope: **macOS Standalone Player (Metal)**.
-- Out of scope (v1): iOS on-device, Editor Play Mode, context-aware capture.
+- In scope: **macOS Standalone Player (Metal)**, Development Build, URP.
+- Out of scope: iOS on-device, Editor Play Mode.
+
+## Notes
+- The launched process PID is authoritative; `gpucapture list` may report "no capturable processes"
+  yet the capture still succeeds against that PID.
+- Hand the returned `.gputrace` path to the `interpret-gpu-trace` skill (tool `Metal_InspectTrace`)
+  to analyze it.
 
 ## CLI reference
-Verified `gpucapture` flags and the v1 capture sequence: [references/gpucapture-cli.md](references/gpucapture-cli.md).
+Verified `gpucapture` flags and the capture sequence: [references/gpucapture-cli.md](references/gpucapture-cli.md).
 Commands are `list` / `boundaries` / `start` / `stop`; `start` takes `-p <pid> -o <path> [-l label | -b id] [-c count] [-u]`.
-
-## TODO
-- [ ] Implement the `Metal.*` tools and reference them from `tools:` above.
-- [ ] Runtime-confirm boundary/count semantics for a single Unity frame (see CLI reference).
-- [ ] Confirm what PID/labels Unity's Metal layer exposes to `gpucapture list` / `boundaries`.
