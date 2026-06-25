@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Usability: **Cancel** button + elapsed-time timer for long capture/inspect; results and the active
   tab **persist across domain reloads**; **Reveal in Finder** and **Copy report** (Markdown) buttons;
   buttons are gated on trace existence and on the capture environment.
+- Left **Captures sidebar** (Memory Profiler-style) listing the `.gputrace` files in the capture
+  folder with their dates; click to select, double-click to inspect. Refreshes after a capture.
 
 ### Fixed
 - `get_timeSinceStartup` error on Inspect: log callbacks from background threads now marshal to the
