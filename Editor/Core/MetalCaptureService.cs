@@ -52,7 +52,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             return dir;
         }
 
-        static string PackageRoot()
+        public static string PackageRoot()
         {
             var pkg = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(MetalCaptureService).Assembly);
             if (pkg != null && !string.IsNullOrEmpty(pkg.resolvedPath)) return pkg.resolvedPath;

@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Dev tool: `Tools > Metal GPU Capture > Generate Doc Screenshots` regenerates the README tab
+  screenshots (Summary/Capture/Details/Log) via macOS `screencapture` (macOS Editor only).
+
 ## [0.2.0] - 2026-06-25
 
 ### Added

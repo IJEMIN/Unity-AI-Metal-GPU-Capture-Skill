@@ -331,7 +331,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         }
 
         // ---------- Tabs ----------
-        void SelectTab(int idx)
+        internal void SelectTab(int idx)
         {
             _activeTab = idx;
             for (int i = 0; i < _pages.Length; i++)
