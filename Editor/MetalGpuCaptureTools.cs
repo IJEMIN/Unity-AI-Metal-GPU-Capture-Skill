@@ -61,6 +61,10 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor.Mcp
             "per-pass GPU cost (default true). Adds ~15-20s and needs an embedded profiling session " +
             "or an M3/A17+ device. Set false for a fast structural inspect (counts + passes only).")]
         public bool loadGpuTiming { get; set; } = true;
+
+        [McpDescription("Also classify the top passes' GPU bottleneck from performance limiters " +
+            "(ALU / texture / fragment-launch / bandwidth). Adds another ~15-20s. Requires loadGpuTiming.")]
+        public bool classifyBottlenecks { get; set; } = false;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -187,7 +191,8 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor.Mcp
                     return Response.Error("Trace not found: " + tracePath);
 
                 bool timing = parameters?.loadGpuTiming ?? true;
-                MetalTraceSummary res = await MetalTraceInspector.InspectAsync(tracePath, null, timing).ConfigureAwait(false);
+                bool classify = (parameters?.classifyBottlenecks ?? false) && timing;
+                MetalTraceSummary res = await MetalTraceInspector.InspectAsync(tracePath, null, timing, classify).ConfigureAwait(false);
                 string gpu = res.gpuFrameTimeAvailable
                     ? ", GPU frame " + res.gpuFrameMs.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + " ms"
                     : "";

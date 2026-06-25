@@ -19,6 +19,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         public double costPercent;      // % of frame GPU time (performance/encoders cost column)
         public double vertexMs;         // per-stage GPU time (0 if absent)
         public double fragmentMs;
+
+        // Bottleneck classification from the encoder's GPU performance limiters (info --all);
+        // populated only for the top passes when classifyBottlenecks is requested.
+        public string bottleneck;       // verdict, e.g. "Fragment-shader-launch bound"
+        public string bottleneckDetail; // top limiters, e.g. "Fragment Shader Launch 91%, Instruction Throughput 74%"
     }
 
     /// <summary>
@@ -47,6 +52,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         public bool gpuFrameTimeAvailable;
         public double gpuFrameMs;
         public bool gpuTimingLoaded;     // true when `profile load` succeeded and timing was parsed
+        public bool bottlenecksClassified; // true when top-pass GPU limiters were classified
         public string timingNote;
 
         // Render passes enumerated via `find [R]`.

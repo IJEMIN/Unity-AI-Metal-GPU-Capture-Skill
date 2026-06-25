@@ -32,6 +32,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             string tracePath,
             Action<string> onLog = null,
             bool includeGpuTiming = false,
+            bool classifyBottlenecks = false,
             CancellationToken cancellationToken = default)
         {
             var s = new MetalTraceSummary { tracePath = tracePath };
@@ -113,7 +114,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             // ----- GPU timing (optional; ~15-20s; requires `profile load`) -----
             if (includeGpuTiming && !cancellationToken.IsCancellationRequested)
             {
-                await LoadGpuTimingAsync(s, onLog, cancellationToken).ConfigureAwait(false);
+                await LoadGpuTimingAsync(s, onLog, classifyBottlenecks, cancellationToken).ConfigureAwait(false);
             }
             else
             {
@@ -134,7 +135,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         /// capture on M3 Pro: timeline info -> {"GPU time":"31.1000 ms", ...}; encoders list ->
         /// {"children":[{"name":"reN","values":[label, {percentage}, vertex ms, frag ms]}], ...}.
         /// </summary>
-        static async Task LoadGpuTimingAsync(MetalTraceSummary s, Action<string> onLog, CancellationToken ct)
+        static async Task LoadGpuTimingAsync(MetalTraceSummary s, Action<string> onLog, bool classify, CancellationToken ct)
         {
             void L(string m) => onLog?.Invoke(m);
             string args = "-t \"" + s.tracePath + "\" --json --oneshot -q";
@@ -194,6 +195,96 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 s.timingNote = "Could not load GPU timing (no embedded profiling session, or a " +
                                "non-M3/A17 replay device). Showing passes ranked by draw count.";
             }
+
+            if (classify && s.gpuTimingLoaded && s.gpuPasses.Count > 0 && !ct.IsCancellationRequested)
+                await ClassifyTopBottlenecksAsync(s, onLog, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Classifies the GPU bottleneck of the top passes from their performance limiters
+        /// (`info --all` on each encoder). One `profile load` + N `info --all` in a single session
+        /// (~15-20s). Verified: encoder info --all (--json) is a flat object whose "* Limiter" keys
+        /// carry percentages (e.g. "Fragment Shader Launch Limiter":"90.85%").
+        /// </summary>
+        static async Task ClassifyTopBottlenecksAsync(MetalTraceSummary s, Action<string> onLog, CancellationToken ct)
+        {
+            void L(string m) => onLog?.Invoke(m);
+            int k = Math.Min(3, s.gpuPasses.Count);
+            var sb = new StringBuilder("profile load\n");
+            for (int i = 0; i < k; i++)
+                sb.Append("go ").Append(s.gpuPasses[i].url).Append("\ninfo --all\n");
+
+            string args = "-t \"" + s.tracePath + "\" --json --oneshot -q";
+            L("Classifying GPU bottlenecks for top " + k + " passes (profile load, ~15-20s)...");
+            ProcessResult pr = await ProcessRunner
+                .RunAsync(GpuDebug, args, null, sb.ToString(), null, 120000, ct)
+                .ConfigureAwait(false);
+            s.rawLog += "\n[bottlenecks]\n" + pr.StdOut +
+                        (string.IsNullOrWhiteSpace(pr.StdErr) ? "" : "\n[stderr]\n" + pr.StdErr);
+            if (pr.TimedOut) return;
+
+            // Encoder info --all objects appear in the same order as the `go` commands.
+            var infos = new List<string>();
+            foreach (string o in ExtractJsonObjects(pr.StdOut))
+                if (o.Contains("\"Encoder type\"")) infos.Add(o);
+
+            for (int i = 0; i < k && i < infos.Count; i++)
+            {
+                ClassifyBottleneck(infos[i], out string verdict, out string detail);
+                s.gpuPasses[i].bottleneck = verdict;
+                s.gpuPasses[i].bottleneckDetail = detail;
+            }
+            if (infos.Count > 0) s.bottlenecksClassified = true;
+        }
+
+        static void ClassifyBottleneck(string infoJson, out string verdict, out string detail)
+        {
+            verdict = null; detail = null;
+            var rx = new Regex("\"([^\"]+Limiter)\"\\s*:\\s*\"([0-9.]+)%\"");
+            var limiters = new List<KeyValuePair<string, double>>();
+            foreach (Match m in rx.Matches(infoJson))
+                if (double.TryParse(m.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
+                    limiters.Add(new KeyValuePair<string, double>(m.Groups[1].Value, v));
+
+            if (limiters.Count == 0) { verdict = "unclassified"; return; }
+            limiters.Sort((a, b) => b.Value.CompareTo(a.Value));
+            verdict = VerdictFor(limiters[0].Key);
+
+            var parts = new List<string>();
+            for (int i = 0; i < limiters.Count && i < 3; i++)
+                parts.Add(string.Format(CultureInfo.InvariantCulture, "{0} {1:F0}%", Shorten(limiters[i].Key), limiters[i].Value));
+
+            double fsOcc = ParsePct(MatchString(infoJson, "FS Occupancy"));
+            if (fsOcc > 0 && fsOcc < 25 && limiters[0].Key.IndexOf("Launch", StringComparison.OrdinalIgnoreCase) < 0)
+                parts.Add(string.Format(CultureInfo.InvariantCulture, "low FS occupancy {0:F0}%", fsOcc));
+
+            detail = string.Join(", ", parts);
+        }
+
+        static string VerdictFor(string name)
+        {
+            string n = name.ToLowerInvariant();
+            if (n.Contains("fragment shader launch"))
+                return "Fragment-shader-launch bound (high fragment work — overdraw / many small triangles / large targets)";
+            if (n.Contains("vertex shader launch") || n.Contains("vertex shader"))
+                return "Vertex/launch bound (too many vertices — LODs, simpler meshes)";
+            if (n.Contains("instruction throughput") || n.Contains("f32") || n.Contains("f16") || n.Contains("alu") || n.Contains("integer"))
+                return "ALU/instruction bound (shader math heavy — simplify shaders, lower precision)";
+            if (n.Contains("texture"))
+                return "Texture bound (sampling/filtering heavy — fewer/cheaper samples, lower-res or compressed textures)";
+            if (n.Contains("buffer") || n.Contains("memory") || n.Contains("bandwidth") || n.Contains("cache"))
+                return "Bandwidth/memory bound (reduce RT precision/size, overdraw, large buffers)";
+            return name + " bound";
+        }
+
+        static string Shorten(string name)
+            => name.EndsWith(" Limiter", StringComparison.Ordinal) ? name.Substring(0, name.Length - " Limiter".Length) : name;
+
+        static double ParsePct(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return 0;
+            Match m = Regex.Match(text, "([0-9.]+)");
+            return (m.Success && double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double v)) ? v : 0;
         }
 
         static void ParseEncoders(string encJson, MetalTraceSummary s)

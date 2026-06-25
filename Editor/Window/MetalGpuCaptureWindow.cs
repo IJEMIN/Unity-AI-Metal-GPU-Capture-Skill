@@ -40,6 +40,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         Button _browseBtn;
         Button _xcodeBtn;
         Toggle _loadTiming;
+        Toggle _classifyBottlenecks;
         IntegerField _targetFps;
         Button _inspectBtn;
         Button _askAiBtn;
@@ -179,6 +180,12 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _loadTiming.tooltip = "Runs `gpudebug profile load` to read real GPU frame/pass time. Slower.";
             _loadTiming.style.marginTop = 4;
             pageCapture.Add(_loadTiming);
+
+            _classifyBottlenecks = new Toggle("Classify bottlenecks (GPU counters, +~15-20s)") { value = true };
+            _classifyBottlenecks.tooltip = "Runs `info --all` on the top passes to find the GPU limiter " +
+                "(ALU / texture / fragment-launch / bandwidth). Requires GPU timing; adds another ~15-20s.";
+            _classifyBottlenecks.style.marginTop = 2;
+            pageCapture.Add(_classifyBottlenecks);
 
             _targetFps = new IntegerField("Target frame rate (fps)") { value = 60 };
             _targetFps.tooltip = "Used by the frame-budget gauge (60 fps = 16.67 ms, 90 = 11.1, 120 = 8.3).";
@@ -361,8 +368,10 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         async Task InspectAndShow(string tracePath)
         {
             bool timing = _loadTiming != null && _loadTiming.value;
-            _statusLabel.text = timing ? "Inspecting + loading GPU timing (~15-20s)..." : "Inspecting trace...";
-            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog, timing).ConfigureAwait(true);
+            bool classify = timing && _classifyBottlenecks != null && _classifyBottlenecks.value;
+            _statusLabel.text = !timing ? "Inspecting trace..."
+                : (classify ? "Inspecting + GPU timing + bottlenecks (~30-40s)..." : "Inspecting + loading GPU timing (~15-20s)...");
+            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog, timing, classify).ConfigureAwait(true);
             _lastSummary = sum;
             ShowResults(sum);
             UpdateAskAiEnabled();
@@ -548,6 +557,8 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (s.gpuTimingLoaded)
             {
                 AddBudgetGauge(s, _summaryContainer);
+                if (s.bottlenecksClassified && s.gpuPasses.Count > 0 && !string.IsNullOrEmpty(s.gpuPasses[0].bottleneck))
+                    _summaryContainer.Add(KV("Top pass bottleneck", s.gpuPasses[0].bottleneck));
                 AddInsights(s, _summaryContainer);
             }
             else
@@ -591,6 +602,16 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                         "    {0}. {1}  -  {2:F2} ms ({3:F1}%)", i + 1, p.label, p.gpuMs, p.costPercent));
                     row.style.whiteSpace = WhiteSpace.Normal;
                     _detailsContainer.Add(row);
+
+                    if (!string.IsNullOrEmpty(p.bottleneck))
+                    {
+                        Label bl = new Label("        ↳ " + p.bottleneck +
+                            (string.IsNullOrEmpty(p.bottleneckDetail) ? string.Empty : "  [" + p.bottleneckDetail + "]"));
+                        bl.style.whiteSpace = WhiteSpace.Normal;
+                        bl.style.fontSize = 11;
+                        bl.style.color = new Color(0.75f, 0.75f, 0.75f);
+                        _detailsContainer.Add(bl);
+                    }
                 }
             }
             else if (s.topPass != null)
