@@ -432,11 +432,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                         metadata: null));
                 }
 
-                AppendLog("Opening AI Assistant with prefilled insight prompt...");
-                // Anchor the prompt popup to the window's SCREEN rect (EditorWindow.position) via the
-                // Rect overload, so it floats as its own popup instead of being embedded in — and
-                // clipped by — this window (the VisualElement overload cut off the submit button).
-                await Unity.AI.Assistant.Editor.Api.AssistantApi.PromptThenRun(position, prompt, ctx).ConfigureAwait(true);
+                AppendLog("Sending insight prompt to the AI Assistant...");
+                // Run() runs the Assistant with its own UI directly — no inline prompt popup. We avoid
+                // PromptThenRun: its popup appears *below* the anchor, embedded in this EditorWindow, so
+                // its submit button gets clipped at the window's bottom edge.
+                await Unity.AI.Assistant.Editor.Api.AssistantApi.Run(prompt, ctx).ConfigureAwait(true);
                 launched = true;
             }
             catch (Exception e)
