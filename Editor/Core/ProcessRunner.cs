@@ -19,12 +19,19 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
     }
 
     /// <summary>
-    /// Runs external CLI tools (gpucapture / gpudebug) without blocking the Editor main thread.
-    /// Drains stdout AND stderr asynchronously to avoid pipe-buffer deadlocks (addendum rule B).
+    /// Runs external CLI tools (gpucapture / gpudebug).
+    ///
+    /// THREADING (critical): the entire process lifecycle — Start, async stdout/stderr draining,
+    /// stdin write, and exit wait — runs on a thread-pool thread via Task.Run, and every await uses
+    /// ConfigureAwait(false). This guarantees the work NEVER depends on the Unity main-thread
+    /// SynchronizationContext. The Unity AI Assistant invokes MCP tools on the main thread
+    /// (UnityEditor.Search.Dispatcher); doing blocking process IO there previously froze the Editor.
+    /// Offloading here makes the tools behave identically whether called from the window or the
+    /// Assistant. Drains stdout AND stderr asynchronously to avoid pipe-buffer deadlocks.
     /// </summary>
     public static class ProcessRunner
     {
-        public static async Task<ProcessResult> RunAsync(
+        public static Task<ProcessResult> RunAsync(
             string fileName,
             string arguments,
             IDictionary<string, string> environment = null,
@@ -32,6 +39,14 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             string workingDirectory = null,
             int timeoutMs = 120000,
             CancellationToken cancellationToken = default)
+        {
+            // Offload the whole thing to the thread pool so it never runs on / blocks the main thread.
+            return Task.Run(() => RunCoreAsync(fileName, arguments, environment, stdin, workingDirectory, timeoutMs, cancellationToken), cancellationToken);
+        }
+
+        static async Task<ProcessResult> RunCoreAsync(
+            string fileName, string arguments, IDictionary<string, string> environment,
+            string stdin, string workingDirectory, int timeoutMs, CancellationToken cancellationToken)
         {
             var psi = new ProcessStartInfo
             {
@@ -73,11 +88,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
                 if (stdin != null)
                 {
-                    await process.StandardInput.WriteAsync(stdin);
+                    await process.StandardInput.WriteAsync(stdin).ConfigureAwait(false);
                     process.StandardInput.Close();
                 }
 
-                bool exited = await WaitForExitAsync(process, timeoutMs, cancellationToken);
+                bool exited = await WaitForExitAsync(process, timeoutMs, cancellationToken).ConfigureAwait(false);
                 bool timedOut = false;
                 if (!exited)
                 {
@@ -86,7 +101,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 }
 
                 // Allow the async readers a moment to flush their final buffers.
-                await Task.WhenAny(Task.WhenAll(outDone.Task, errDone.Task), Task.Delay(1000));
+                await Task.WhenAny(Task.WhenAll(outDone.Task, errDone.Task), Task.Delay(1000)).ConfigureAwait(false);
 
                 string outStr; lock (stdout) outStr = stdout.ToString();
                 string errStr; lock (stderr) errStr = stderr.ToString();
@@ -117,7 +132,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 using (ct.Register(() => tcs.TrySetCanceled()))
                 {
                     Task delay = Task.Delay(timeoutMs, ct);
-                    Task completed = await Task.WhenAny(tcs.Task, delay);
+                    Task completed = await Task.WhenAny(tcs.Task, delay).ConfigureAwait(false);
                     return completed == tcs.Task && tcs.Task.Status == TaskStatus.RanToCompletion;
                 }
             }

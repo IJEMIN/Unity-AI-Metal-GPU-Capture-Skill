@@ -2,21 +2,25 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using UnityEngine;
 
 namespace JeminLee.MetalGpuCaptureSkill.Editor
 {
     /// <summary>
     /// Inspects a .gputrace using `gpudebug -t <trace> --json --oneshot -q` and parses the result
     /// into a MetalTraceSummary. Schema verified against a real Standalone Metal capture:
-    ///   status -> {device, profileState, summary:"N command buffers, M encoders, K draw calls", trace}
+    ///   status  -> {device, profileState, summary:"N command buffers, M encoders, K draw calls", trace}
     ///   find [R] -> {matches:[{label, summary:"n draws", url}], totalMatches}
     /// Per-pass / frame GPU time is NOT exposed by gpudebug v1.0 (all cost/counter views empty), so
     /// timing is reported as unavailable and the "top pass" is ranked by draw count.
-    /// All CLI I/O goes through ProcessRunner (async stdout+stderr draining, no main-thread block).
+    ///
+    /// THREADING: all IO runs on the thread pool (ProcessRunner) and parsing uses only thread-safe
+    /// APIs (regex / string), with ConfigureAwait(false). This method must be safe to complete
+    /// without the Unity main thread, because the AI Assistant invokes it on the main thread and
+    /// depending on the main-thread SynchronizationContext there froze the Editor.
     /// </summary>
     public static class MetalTraceInspector
     {
@@ -43,13 +47,15 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             string stdin = "status\nfind [R]\n";
 
             L("Running: gpudebug " + args);
-            ProcessResult pr = await ProcessRunner.RunAsync(GpuDebug, args, null, stdin, null, 90000, cancellationToken);
+            ProcessResult pr = await ProcessRunner
+                .RunAsync(GpuDebug, args, null, stdin, null, 60000, cancellationToken)
+                .ConfigureAwait(false);
             s.rawLog = pr.StdOut + (string.IsNullOrWhiteSpace(pr.StdErr) ? "" : "\n[stderr]\n" + pr.StdErr);
 
             if (pr.TimedOut)
             {
                 s.success = false;
-                s.error = "gpudebug timed out.";
+                s.error = "gpudebug timed out (60s). The trace may be very large or gpudebug hung.";
                 return s;
             }
 
@@ -60,47 +66,38 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             // ----- status -----
             if (!string.IsNullOrEmpty(statusJson))
             {
-                try
-                {
-                    var st = JsonUtility.FromJson<StatusDto>(statusJson);
-                    s.device = st != null ? st.device : null;
-                    if (st != null) ParseCounts(st.summary, s);
-                }
-                catch (Exception e) { L("status parse warning: " + e.Message); }
+                s.device = JsonUnescape(MatchString(statusJson, "device"));
+                ParseCounts(JsonUnescape(MatchString(statusJson, "summary")), s);
             }
             else L("warning: no status JSON found in gpudebug output.");
 
             // ----- find [R] -----
             if (!string.IsNullOrEmpty(findJson))
             {
-                try
+                int tm = MatchInt(findJson, "totalMatches");
+                s.totalMatches = tm;
+                s.passesCapped = tm >= 100; // gpudebug caps find at 100
+
+                // Each match: {"label":"...","summary":"...","url":"..."} (key order stable).
+                var rx = new Regex(
+                    "\\{\\s*\"label\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*" +
+                    "\"summary\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*" +
+                    "\"url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*\\}");
+                foreach (Match m in rx.Matches(findJson))
                 {
-                    var fd = JsonUtility.FromJson<FindDto>(findJson);
-                    if (fd != null)
+                    s.passes.Add(new MetalPassInfo
                     {
-                        s.totalMatches = fd.totalMatches;
-                        s.passesCapped = fd.totalMatches >= 100; // gpudebug caps find at 100
-                        if (fd.matches != null)
-                        {
-                            foreach (var m in fd.matches)
-                            {
-                                s.passes.Add(new MetalPassInfo
-                                {
-                                    label = TrimQuotes(m.label),
-                                    drawCount = ParseDraws(m.summary),
-                                    url = m.url,
-                                    gpuTimeAvailable = false,
-                                    gpuMs = 0,
-                                });
-                            }
-                        }
-                    }
+                        label = TrimQuotes(JsonUnescape(m.Groups[1].Value)),
+                        drawCount = ParseDraws(JsonUnescape(m.Groups[2].Value)),
+                        url = JsonUnescape(m.Groups[3].Value),
+                        gpuTimeAvailable = false,
+                        gpuMs = 0,
+                    });
                 }
-                catch (Exception e) { L("find parse warning: " + e.Message); }
             }
             else L("warning: no find JSON found in gpudebug output.");
 
-            // ----- timing: unavailable -----
+            // ----- timing: unavailable (never fabricated) -----
             s.cpuFrameTimeAvailable = false;
             s.gpuFrameTimeAvailable = false;
             s.timingNote = "CPU/GPU frame time not available: gpudebug v1.0 exposes no frame or " +
@@ -126,17 +123,55 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             s.drawCallCount      = ReadInt(summary, @"(\d+)\s+draw call");
         }
 
-        static int ParseDraws(string summary)
-        {
-            // "343 draws", "1 draw", or ""
-            return ReadInt(summary, @"(\d+)\s+draw");
-        }
+        static int ParseDraws(string summary) => ReadInt(summary, @"(\d+)\s+draw");
 
         static int ReadInt(string text, string pattern)
         {
             if (string.IsNullOrEmpty(text)) return 0;
             Match m = Regex.Match(text, pattern);
             return (m.Success && int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)) ? v : 0;
+        }
+
+        // Extract a JSON string field value (still escaped) for the given key from a JSON object string.
+        static string MatchString(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            var m = Regex.Match(json, "\"" + Regex.Escape(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        static int MatchInt(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return 0;
+            var m = Regex.Match(json, "\"" + Regex.Escape(key) + "\"\\s*:\\s*(\\d+)");
+            return (m.Success && int.TryParse(m.Groups[1].Value, out int v)) ? v : 0;
+        }
+
+        // Minimal JSON string unescape for the escapes gpudebug emits (\/ \" \\ \n \t).
+        static string JsonUnescape(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\' && i + 1 < s.Length)
+                {
+                    char n = s[++i];
+                    switch (n)
+                    {
+                        case '/': sb.Append('/'); break;
+                        case '\"': sb.Append('\"'); break;
+                        case '\\': sb.Append('\\'); break;
+                        case 'n': sb.Append('\n'); break;
+                        case 't': sb.Append('\t'); break;
+                        case 'r': sb.Append('\r'); break;
+                        default: sb.Append(n); break;
+                    }
+                }
+                else sb.Append(c);
+            }
+            return sb.ToString();
         }
 
         static string TrimQuotes(string s)
@@ -185,9 +220,5 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             }
             return list;
         }
-
-        [Serializable] class StatusDto { public string device; public int profileState; public string summary; public string trace; }
-        [Serializable] class FindDto { public List<FindMatchDto> matches; public int totalMatches; }
-        [Serializable] class FindMatchDto { public string label; public string summary; public string url; }
     }
 }

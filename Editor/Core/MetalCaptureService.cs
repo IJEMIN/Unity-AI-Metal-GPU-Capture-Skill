@@ -23,9 +23,14 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
     /// <summary>
     /// Launches the Standalone Player with Metal capture enabled, waits for a representative
-    /// frame WITHOUT blocking the main thread, resolves the PID, and captures a .gputrace via
-    /// gpucapture. Tries a single-frame boundary capture first, then falls back to
-    /// --until-exit + stop (plan rule D). All CLI I/O goes through ProcessRunner (rule B).
+    /// frame, resolves the PID, and captures a .gputrace via gpucapture. Tries a single-frame
+    /// boundary capture first, then falls back to --until-exit + stop. All CLI I/O goes through
+    /// ProcessRunner (which runs off the main thread).
+    ///
+    /// THREADING: CapturesDir() uses a main-thread-only API (PackageManager.PackageInfo), so it is
+    /// resolved up front on the calling thread (the window and the MCP tool both call this on the
+    /// Unity main thread). Every await uses ConfigureAwait(false) so the capture never depends on
+    /// the main-thread SynchronizationContext (which froze the Editor when invoked by the Assistant).
     /// </summary>
     public static class MetalCaptureService
     {
@@ -73,6 +78,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             var sb = new StringBuilder();
             void L(string m) { sb.AppendLine(m); onLog?.Invoke(m); }
 
+            // Resolve main-thread-only paths BEFORE any ConfigureAwait(false) await.
+            string capturesDir;
+            try { capturesDir = CapturesDir(); }
+            catch (Exception e) { r.success = false; r.error = "Cannot resolve Captures dir: " + e.Message; r.log = sb.ToString(); return r; }
+
             string exe = ResolveInnerExecutable(appPath, out string err);
             if (exe == null) { r.success = false; r.error = err; r.log = sb.ToString(); return r; }
             L("Launching player: " + exe);
@@ -86,7 +96,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = exe,
-                    UseShellExecute = false,   // player keeps inherited stdout/stderr -> no pipe to deadlock
+                    UseShellExecute = false,
                     CreateNoWindow = false,
                 };
                 foreach (var kv in env) psi.EnvironmentVariables[kv.Key] = kv.Value;
@@ -98,9 +108,9 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             }
 
             r.pid = player.Id;
-            L(string.Format("Player PID = {0}. Warming up {1}s (non-blocking)...", r.pid, warmupSeconds));
+            L(string.Format("Player PID = {0}. Warming up {1}s...", r.pid, warmupSeconds));
 
-            try { await Task.Delay(Math.Max(0, warmupSeconds) * 1000, cancellationToken); }
+            try { await Task.Delay(Math.Max(0, warmupSeconds) * 1000, cancellationToken).ConfigureAwait(false); }
             catch (OperationCanceledException)
             { TryKill(player); r.error = "Canceled during warm-up."; r.log = sb.ToString(); return r; }
 
@@ -114,18 +124,18 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             }
 
             // Cross-check PID against gpucapture list (diagnostic only; launched PID is authoritative).
-            var list = await ProcessRunner.RunAsync(GpuCapture, "list", timeoutMs: 30000, cancellationToken: cancellationToken);
+            var list = await ProcessRunner.RunAsync(GpuCapture, "list", timeoutMs: 30000, cancellationToken: cancellationToken).ConfigureAwait(false);
             L("gpucapture list:\n" + Trunc(list.StdOut) + (string.IsNullOrWhiteSpace(list.StdErr) ? "" : "\n[stderr] " + Trunc(list.StdErr)));
 
             string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string tracePath = Path.Combine(CapturesDir(), "frame_" + ts + ".gputrace");
+            string tracePath = Path.Combine(capturesDir, "frame_" + ts + ".gputrace");
             string method;
 
             // --- Attempt 1: single-frame boundary capture (-b 0 -c 1) ---
             L("Capture attempt 1: boundary (-b 0 -c 1) -> " + tracePath);
             var a1 = await ProcessRunner.RunAsync(GpuCapture,
                 "start -p " + r.pid + " -o " + Q(tracePath) + " -b 0 -c 1",
-                timeoutMs: 60000, cancellationToken: cancellationToken);
+                timeoutMs: 60000, cancellationToken: cancellationToken).ConfigureAwait(false);
             LogCli(L, "boundary start", a1);
 
             bool ok = TraceExists(tracePath);
@@ -141,13 +151,13 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                     "start -p " + r.pid + " -o " + Q(tracePath) + " --until-exit",
                     timeoutMs: 60000, cancellationToken: cancellationToken);
 
-                try { await Task.Delay(2500, cancellationToken); } catch (OperationCanceledException) { }
+                try { await Task.Delay(2500, cancellationToken).ConfigureAwait(false); } catch (OperationCanceledException) { }
 
                 var stop = await ProcessRunner.RunAsync(GpuCapture,
-                    "stop -p " + r.pid, timeoutMs: 30000, cancellationToken: cancellationToken);
+                    "stop -p " + r.pid, timeoutMs: 30000, cancellationToken: cancellationToken).ConfigureAwait(false);
                 LogCli(L, "stop", stop);
 
-                var a2 = await startTask;
+                var a2 = await startTask.ConfigureAwait(false);
                 LogCli(L, "until-exit start", a2);
 
                 ok = TraceExists(tracePath);

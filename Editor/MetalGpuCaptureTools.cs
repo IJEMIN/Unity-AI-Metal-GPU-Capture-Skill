@@ -151,7 +151,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor.Mcp
                                           "Call Metal.BuildStandalonePlayer first.");
 
                 MetalCaptureResult res = await MetalCaptureService.CaptureAsync(
-                    appPath, p.warmupSeconds, p.waitForSignal, null);
+                    appPath, p.warmupSeconds, p.waitForSignal, null).ConfigureAwait(false);
 
                 return res.success
                     ? Response.Success("Captured frame (" + res.method + "): " + res.tracePath, res)
@@ -181,7 +181,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor.Mcp
                 if (!(File.Exists(tracePath) || Directory.Exists(tracePath)))
                     return Response.Error("Trace not found: " + tracePath);
 
-                MetalTraceSummary res = await MetalTraceInspector.InspectAsync(tracePath, null);
+                MetalTraceSummary res = await MetalTraceInspector.InspectAsync(tracePath, null).ConfigureAwait(false);
                 return res.success
                     ? Response.Success("Inspected trace (" + res.encoderCount + " encoders, " +
                         res.drawCallCount + " draws).", res)
