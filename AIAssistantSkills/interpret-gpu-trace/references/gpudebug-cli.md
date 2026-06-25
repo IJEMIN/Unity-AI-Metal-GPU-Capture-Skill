@@ -36,8 +36,28 @@ gpudebug -t <path>/frame.gputrace --json --oneshot -q [-o <fetch-dir>] < command
 - `--json` for machine-readable results.
 - `-o` to collect fetched resources (textures/buffers) for Unity-context correlation.
 
-### Needs runtime confirmation (requires a real `.gputrace`)
-- Exact REPL command set. Expected from prior notes: `list / go / info / fetch / find / next / prev / status`.
-  Confirm names, arguments, and which honor `--json` once a trace is loaded.
-- How encoder / pass / draw labels appear, so they can be mapped to Unity SRP (URP) `ScriptableRenderPass`,
-  shader/material names, and Profiler / `CommandBuffer` markers.
+## REPL commands (confirmed 2026-06-25 against a real URP Standalone capture, Apple M3 Pro)
+`list`, `go <name|url>`, `info [--all]`, `find <text>`, `next` / `prev`, `fetch`, `status`, `wait`,
+`profile`, `help`, `exit`. Per-command help: `<command> ?`. Navigation tree:
+`commands/cb<N>/grp<N>/re<N>/draw<N>`, `api_calls`, `resources`, and (after profiling) `performance`.
+
+## GPU timing / profiling — how to get GPU frame time
+The `performance` subtree is EMPTY until a profiling session is loaded.
+- `profile` — status; `profile list` — embedded sessions in the trace.
+- `profile load [N]` — load an embedded session (~15-18s; replayer must be ready).
+- `profile run [--gpu-state low|medium|high] [--exec overlapping|serial] [--embed]` — collect from the
+  device; **requires an M3/A17+ replay GPU**.
+- After loading:
+  - `go performance/timeline` + `info --all` → whole-frame **GPU time** (e.g. `GPU time 31.1000 ms`,
+    plus `Frame duration`, `Frame begin/end` ns).
+  - `go performance/encoders` (sorted by cost) → **per-pass GPU time** (Cost %, Vertex/Fragment/Compute ms)
+    — the top render pass by GPU cost.
+  - `go performance/shaders` / `performance/commands` → per-shader / per-draw cost.
+  - `go performance/timeline/counters` → 30 GPU counter groups; counter time-series fetchable as JSON.
+
+**CPU frame time is NOT in a GPU trace** (no `info` on `commands` / `cb<N>`). Get CPU frame time from
+Unity (`FrameTimingManager` / ProfilerRecorder), not from gpudebug.
+
+### Still to confirm
+- Which `performance` views emit JSON via `--json` directly vs. needing `fetch` to write JSON.
+- Encoder/pass label → URP `ScriptableRenderPass` mapping (see the skill's mapping table).

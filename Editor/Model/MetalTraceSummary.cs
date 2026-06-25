@@ -11,11 +11,14 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         public int drawCount;           // parsed from gpudebug summary ("110 draws")
         public string url;              // gpudebug node URL, e.g. commands/cb0/.../re12
 
-        // GPU timing is NOT exposed by gpudebug v1.0 for Standalone Metal frame captures
-        // (every performance/encoders + timeline/counters view returns empty, confirmed against a
-        // real trace). Kept here so the model is forward-compatible if a future tool exposes it.
-        public bool gpuTimeAvailable;   // false in v1
-        public double gpuMs;            // 0 when unavailable
+        // GPU timing, populated only when the trace's profiling session is loaded
+        // (`profile load`; see MetalTraceInspector). costPercent is the encoder's share of frame
+        // GPU time; gpuMs = costPercent% of the frame GPU time; vertex/fragment are per-stage ms.
+        public bool gpuTimeAvailable;   // true once profile timing is loaded
+        public double gpuMs;            // encoder GPU time (0 when timing not loaded)
+        public double costPercent;      // % of frame GPU time (performance/encoders cost column)
+        public double vertexMs;         // per-stage GPU time (0 if absent)
+        public double fragmentMs;
     }
 
     /// <summary>
@@ -35,13 +38,15 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         public int encoderCount;
         public int drawCallCount;
 
-        // Frame timings. gpudebug v1.0 exposes NEITHER cpu nor gpu frame time for these traces,
-        // so both are surfaced as "unavailable" (never fabricated). availability flags let the
+        // Frame timings. GPU frame time is available when the profiling session is loaded
+        // (gpuFrameTimeAvailable / gpuTimingLoaded). CPU frame time is never in a GPU trace, so it
+        // stays unavailable here (get it from Unity FrameTimingManager). Availability flags let the
         // UI/Assistant distinguish "0 ms" from "not measured".
         public bool cpuFrameTimeAvailable;
         public double cpuFrameMs;
         public bool gpuFrameTimeAvailable;
         public double gpuFrameMs;
+        public bool gpuTimingLoaded;     // true when `profile load` succeeded and timing was parsed
         public string timingNote;
 
         // Render passes enumerated via `find [R]`.
@@ -49,8 +54,12 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         public int totalMatches;        // gpudebug find totalMatches (capped at 100)
         public bool passesCapped;       // true when find hit its 100-result cap
 
-        // "Top GPU pass": gpuMs is unavailable, so this is the pass with the MOST DRAW CALLS
-        // (documented proxy). topPassMetric describes which metric was used.
+        // Render encoders ranked by GPU cost (from performance/encoders after profile load);
+        // empty unless GPU timing was loaded. Highest cost first.
+        public List<MetalPassInfo> gpuPasses = new List<MetalPassInfo>();
+
+        // "Top pass": the top GPU-cost encoder when timing is loaded, else the most-draws pass.
+        // topPassMetric says which ("GPU time" or "draw count").
         public MetalPassInfo topPass;
         public string topPassMetric;
 

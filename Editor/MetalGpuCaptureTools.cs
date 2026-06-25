@@ -56,6 +56,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor.Mcp
     {
         [McpDescription("Absolute path to a .gputrace file to inspect.")]
         public string tracePath { get; set; }
+
+        [McpDescription("Load the trace's GPU profiling session to get real GPU frame time and " +
+            "per-pass GPU cost (default true). Adds ~15-20s and needs an embedded profiling session " +
+            "or an M3/A17+ device. Set false for a fast structural inspect (counts + passes only).")]
+        public bool loadGpuTiming { get; set; } = true;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -166,9 +171,9 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor.Mcp
         public const string Title = "Inspect a .gputrace";
         public const string Description =
             "Inspects a .gputrace via gpudebug --json and returns a summary: device, command " +
-            "buffer/encoder/draw counts, the render passes ([R] encoders with draw counts and " +
-            "URP labels), and the top pass by draw count. NOTE: gpudebug v1.0 exposes no CPU or " +
-            "GPU frame timing for these captures, so timing is reported as unavailable.";
+            "buffer/encoder/draw counts, the render passes ([R] encoders with URP labels), and " +
+            "(when loadGpuTiming is true, the default) the whole-frame GPU time plus per-pass GPU " +
+            "cost from the trace's profiling session. CPU frame time is not in a GPU trace.";
 
         [McpTool("Metal.InspectTrace", Description, Title, Groups = new[] { "metal", "profiling" })]
         public static async Task<object> HandleCommand(MetalInspectParams parameters)
@@ -181,10 +186,14 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor.Mcp
                 if (!(File.Exists(tracePath) || Directory.Exists(tracePath)))
                     return Response.Error("Trace not found: " + tracePath);
 
-                MetalTraceSummary res = await MetalTraceInspector.InspectAsync(tracePath, null).ConfigureAwait(false);
+                bool timing = parameters?.loadGpuTiming ?? true;
+                MetalTraceSummary res = await MetalTraceInspector.InspectAsync(tracePath, null, timing).ConfigureAwait(false);
+                string gpu = res.gpuFrameTimeAvailable
+                    ? ", GPU frame " + res.gpuFrameMs.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + " ms"
+                    : "";
                 return res.success
                     ? Response.Success("Inspected trace (" + res.encoderCount + " encoders, " +
-                        res.drawCallCount + " draws).", res)
+                        res.drawCallCount + " draws" + gpu + ").", res)
                     : Response.Error("Inspect failed: " + res.error, res);
             }
             catch (Exception e) { return Response.Error("InspectTrace failed: " + e.Message); }

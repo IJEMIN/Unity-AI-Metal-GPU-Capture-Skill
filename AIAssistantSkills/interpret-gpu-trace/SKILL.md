@@ -1,6 +1,6 @@
 ---
 name: interpret-gpu-trace
-description: Inspect a captured .gputrace with gpudebug and interpret it in Unity URP context (render passes, ScriptableRenderPass, shaders/materials, render targets) to surface prioritized GPU optimization insights. gpudebug v1.0 exposes no per-pass GPU timing, so cost is reasoned from draw counts plus URP pass/shader context.
+description: Inspect a captured .gputrace with gpudebug and interpret it in Unity URP context (render passes, ScriptableRenderPass, shaders/materials, render targets) to surface prioritized GPU optimization insights. gpudebug v1.0 DOES expose per-frame and per-pass GPU time after loading the profiling session (`profile load`/`profile run`); CPU frame time is not in the trace (use Unity FrameTimingManager).
 required_packages:
   com.unity.ai.assistant: ">=2.0.0"
 required_editor_version: ">=6000.0.0"
@@ -26,16 +26,29 @@ my URP rendering".
    and gpudebug node URLs); and the top pass by draw count.
 2. **Map to URP** — translate each Metal encoder / debug-group label to its URP construct using the
    table below.
-3. **Prioritize** — rank suspected cost by draw count and pass type (no measured GPU time is
-   available; see Timing caveat). Produce concrete, URP-specific actions.
+3. **Prioritize** — rank by **measured GPU time** when a profiling session is loaded (see GPU timing
+   below); otherwise fall back to draw count + pass type. Produce concrete, URP-specific actions.
 4. **(Optional) Drill deeper** — for a specific pass, the gpudebug node URL from `Metal_InspectTrace`
    can be navigated directly (see "Deeper inspection").
 
-## Timing caveat (important, do not fabricate)
-gpudebug v1.0 does **not** expose CPU or per-encoder/frame **GPU time** for Standalone Metal frame
-captures (its `performance/encoders` and `timeline/counters` views return empty even after
-`profile run`). Never invent millisecond numbers. Reason about cost from **draw counts**, **pass
-type**, **render-target size/format**, and **pass count**, and say timing is unavailable.
+## GPU timing (available — load the profiling session first)
+gpudebug v1.0 **does** expose GPU time, but the `performance` subtree is empty until a profiling
+session is loaded. The earlier "no timing" conclusion was wrong — it was a missing `profile load`.
+Verified against a real URP Standalone capture on Apple M3 Pro:
+- `profile load` (loads the embedded session if the trace has one; ~15-18s), or `profile run`
+  (collects from device; requires an M3/A17+ replay GPU) — optionally `profile embed` to persist it.
+- `performance/timeline` → `info --all` → whole-frame **GPU time** (e.g. `GPU time 31.1000 ms`).
+- `performance/encoders` (sorted by cost) → **per-pass GPU time** with vertex/fragment/compute ms —
+  this is the "top GPU pass" (e.g. `[R] RenderLoop.DrawSRPBatcher` fragment 2.46 ms).
+- `performance/timeline/counters` → 30 GPU counter groups (occupancy, bandwidth, ALU, texture,
+  caches, MMU…), fetchable as JSON.
+
+Read **real** numbers — never invent millisecond values. If no profiling session can be loaded
+(e.g. non-M3/A17 device and no embedded session), say GPU time is unavailable and fall back to draw
+counts + pass type.
+
+**CPU frame time is NOT in a GPU trace** — gpucapture/gpudebug only record GPU work. Get the app's CPU
+frame time from Unity (`FrameTimingManager` / ProfilerRecorder), not from the trace.
 
 ## Metal label -> URP mapping
 Labels appear as Unity debug groups (e.g. `ExecuteRenderGraph`) and Metal render encoders prefixed
