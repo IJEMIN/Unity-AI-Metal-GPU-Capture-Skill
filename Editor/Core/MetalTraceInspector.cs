@@ -129,30 +129,74 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         }
 
         /// <summary>
-        /// Second pass: `profile load` then read whole-frame GPU time (performance/timeline) and
-        /// per-encoder GPU cost (performance/encoders). Mutates the summary. ~15-20s. All IO runs off
-        /// the main thread via ProcessRunner. JSON schema verified against a real URP Standalone
-        /// capture on M3 Pro: timeline info -> {"GPU time":"31.1000 ms", ...}; encoders list ->
-        /// {"children":[{"name":"reN","values":[label, {percentage}, vertex ms, frag ms]}], ...}.
+        /// Loads GPU timing into the summary: tries `profile load` (an embedded session); if the trace
+        /// has none — fresh gpucapture captures don't — runs `profile run --embed` to collect and bake
+        /// a session into the .gputrace (needs an Apple M3/A17+ replay device), then reads again in a
+        /// fresh session (run+load in the *same* session doesn't expose the cost breakdown). Reads
+        /// whole-frame GPU time (performance/timeline) and per-pass GPU cost (performance/encoders).
+        /// All IO runs off the main thread. Verified on M3 Pro.
         /// </summary>
         static async Task LoadGpuTimingAsync(MetalTraceSummary s, Action<string> onLog, bool classify, CancellationToken ct)
         {
             void L(string m) => onLog?.Invoke(m);
+
+            bool ok = await TryReadTimingAsync(s, onLog, ct).ConfigureAwait(false);
+
+            if (!ok && !ct.IsCancellationRequested)
+            {
+                L("No embedded profiling session — running `profile run --embed` (Apple M3/A17+, ~10-15s)...");
+                ProcessResult emb = await ProcessRunner
+                    .RunAsync(GpuDebug, "-t \"" + s.tracePath + "\" --oneshot -q", null, "profile run --embed\n", null, 180000, ct)
+                    .ConfigureAwait(false);
+                s.rawLog += "\n[profile-embed]\n" + emb.StdOut +
+                            (string.IsNullOrWhiteSpace(emb.StdErr) ? "" : "\n[stderr]\n" + emb.StdErr);
+                if (!emb.TimedOut && !ct.IsCancellationRequested)
+                    ok = await TryReadTimingAsync(s, onLog, ct).ConfigureAwait(false);
+            }
+
+            if (ok)
+            {
+                s.gpuTimingLoaded = true;
+                if (s.gpuPasses.Count > 0)
+                {
+                    s.topPass = s.gpuPasses[0];   // performance/encoders is sorted by cost (highest first)
+                    s.topPassMetric = "GPU time";
+                }
+                s.timingNote = "GPU timing from the trace's profiling session. " +
+                               "CPU frame time is not in a GPU trace (use Unity FrameTimingManager).";
+
+                if (classify && s.gpuPasses.Count > 0 && !ct.IsCancellationRequested)
+                    await ClassifyTopBottlenecksAsync(s, onLog, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                s.timingNote = "Could not load or collect GPU timing — profiling needs an Apple " +
+                               "M3/A17+ replay device. Showing passes ranked by draw count.";
+            }
+        }
+
+        /// <summary>
+        /// Runs `profile load` and reads whole-frame GPU time + per-encoder cost into the summary.
+        /// Returns true when a frame GPU time was found (an embedded session was present and loaded).
+        /// JSON schema (M3 Pro): timeline info -> {"GPU time":"21.33 ms", ...}; encoders list ->
+        /// {"children":[{"name":"reN","values":[label, {percentage}, vertex ms, frag ms]}], ...}.
+        /// </summary>
+        static async Task<bool> TryReadTimingAsync(MetalTraceSummary s, Action<string> onLog, CancellationToken ct)
+        {
+            void L(string m) => onLog?.Invoke(m);
+            s.gpuPasses.Clear();
+            s.gpuFrameTimeAvailable = false;
+
             string args = "-t \"" + s.tracePath + "\" --json --oneshot -q";
             string stdin = "profile load\ngo performance/timeline\ninfo --all\ngo performance/encoders\nlist --all\n";
 
-            L("Loading GPU timing (profile load, ~15-20s)...");
+            L("Reading GPU timing (profile load, ~15-20s)...");
             ProcessResult pr = await ProcessRunner
-                .RunAsync(GpuDebug, args, null, stdin, null, 120000, ct)
+                .RunAsync(GpuDebug, args, null, stdin, null, 180000, ct)
                 .ConfigureAwait(false);
             s.rawLog += "\n[gpu-timing]\n" + pr.StdOut +
                         (string.IsNullOrWhiteSpace(pr.StdErr) ? "" : "\n[stderr]\n" + pr.StdErr);
-
-            if (pr.TimedOut)
-            {
-                s.timingNote = "GPU timing load timed out (120s).";
-                return;
-            }
+            if (pr.TimedOut) return false;
 
             List<string> objs = ExtractJsonObjects(pr.StdOut);
 
@@ -179,25 +223,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (!string.IsNullOrEmpty(encJson))
                 ParseEncoders(encJson, s);
 
-            if (s.gpuFrameTimeAvailable)
-            {
-                s.gpuTimingLoaded = true;
-                if (s.gpuPasses.Count > 0)
-                {
-                    s.topPass = s.gpuPasses[0];   // performance/encoders is sorted by cost (highest first)
-                    s.topPassMetric = "GPU time";
-                }
-                s.timingNote = "GPU timing from the trace's profiling session. " +
-                               "CPU frame time is not in a GPU trace (use Unity FrameTimingManager).";
-            }
-            else
-            {
-                s.timingNote = "Could not load GPU timing (no embedded profiling session, or a " +
-                               "non-M3/A17 replay device). Showing passes ranked by draw count.";
-            }
-
-            if (classify && s.gpuTimingLoaded && s.gpuPasses.Count > 0 && !ct.IsCancellationRequested)
-                await ClassifyTopBottlenecksAsync(s, onLog, ct).ConfigureAwait(false);
+            return s.gpuFrameTimeAvailable;
         }
 
         /// <summary>

@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   main thread before touching the UI Toolkit scheduler.
 - Ask-AI prompt popup's submit button was clipped by the window; insights now go straight to the
   Assistant via `AssistantApi.Run` (no inline popup).
+- GPU timing showed "unavailable" for fresh captures (which have no embedded profiling session):
+  the inspector now collects + bakes a session via `profile run --embed` (Apple M3/A17+) before loading.
+
+### Changed
+- Capture folder defaults to the package's `Captures/` folder on first open (instead of blank).
 
 ## [0.1.0] - 2026-06-23
 

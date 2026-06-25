@@ -195,6 +195,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _captureDirField.style.marginTop = 4;
             _captureDirField.RegisterValueChangedCallback(e => EditorPrefs.SetString(PrefCaptureDir, e.newValue));
             pageCapture.Add(_captureDirField);
+            if (string.IsNullOrEmpty(_captureDirField.value))
+            {
+                // Default to the package's Captures/ folder (resolved + persisted on first open).
+                try { _captureDirField.value = MetalCaptureService.CapturesDir(); } catch { }
+            }
 
             Button browseDirBtn = new Button(OnBrowseCaptureDir) { text = "Choose capture folder…" };
             browseDirBtn.style.marginTop = 2;
