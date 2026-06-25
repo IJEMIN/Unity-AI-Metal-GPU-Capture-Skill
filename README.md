@@ -81,6 +81,11 @@ Ask the Assistant to "capture a Metal frame and analyze it", or click **Ask AI A
 on a captured trace — it hands the Assistant the measured summary (GPU frame time + top passes) and runs
 the `interpret-gpu-trace` skill. The same five tools power both the window and the Assistant.
 
+![AI Assistant with the attached trace summary](Documentation~/images/metal-gpu-capture-assistant.png)
+
+*The button sends a prefilled prompt plus the captured **Metal GPU Trace Summary** as attached context;
+the Assistant then selects and runs the `interpret-gpu-trace` skill.*
+
 ## How it works
 
 - `gpucapture` attaches to the player (launched with `MTL_CAPTURE_ENABLED=1`) and writes a `.gputrace`
