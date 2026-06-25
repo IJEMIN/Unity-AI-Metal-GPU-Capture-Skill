@@ -40,7 +40,10 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
         public static string CapturesDir()
         {
-            string dir = Path.Combine(PackageRoot(), "Captures");
+            // Default to <ProjectRoot>/MetalGpuCaptures (NOT inside the package — packages are usually
+            // read-only). Mirrors Unity Memory Profiler's <Project>/MemoryCaptures convention.
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            string dir = Path.Combine(projectRoot, "MetalGpuCaptures");
             Directory.CreateDirectory(dir);
             return dir;
         }

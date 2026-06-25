@@ -8,7 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Dev tool: `Tools > Metal GPU Capture > Generate Doc Screenshots` regenerates the README tab
-  screenshots (Summary/Capture/Details/Log) via macOS `screencapture` (macOS Editor only).
+  screenshots via macOS `screencapture` (macOS Editor only).
+
+### Changed
+- Window IA (Memory-Profiler-style): **Capture** is now a left-sidebar action (with a collapsible
+  Capture-settings foldout); the tabs are per-trace views (**Summary / Details / Log**). Selecting a
+  capture in the sidebar loads its **cached** inspection — or prompts to Inspect it — instead of
+  showing the previously inspected trace. The inspection cache persists across Editor recompiles.
+- Default capture folder is now `<Project>/MetalGpuCaptures` (was inside the package, which is
+  typically read-only).
 
 ## [0.2.0] - 2026-06-25
 

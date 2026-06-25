@@ -21,9 +21,8 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         static readonly (int tab, string file)[] Shots =
         {
             (0, "metal-gpu-capture-summary.png"),
-            (1, "metal-gpu-capture-capture.png"),
-            (2, "metal-gpu-capture-details.png"),
-            (3, "metal-gpu-capture-log.png"),
+            (1, "metal-gpu-capture-details.png"),
+            (2, "metal-gpu-capture-log.png"),
         };
 
         const int StepMs = 600; // delay between "switch tab" and "capture", and between tabs

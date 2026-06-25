@@ -41,40 +41,38 @@ Enable the skills under `Project Settings / Preferences > AI > Skills` (they are
 ## Usage
 
 ### The window
-Open **`Window > Analysis > Metal GPU Capture`**. It has four tabs; the status line stays visible across
-all of them, and the window jumps to **Summary** after a capture/inspect.
+Open **`Window > Analysis > Metal GPU Capture`**. The layout mirrors Unity's Memory Profiler — a
+**left sidebar** to capture and list traces, and a **main area** with per-trace tabs.
 
-- **Capture** — run a capture or point at an existing trace:
-  - *Environment* — checks macOS ≥ 27, `gpucapture`/`gpudebug` on PATH, and that Metal is the active API.
-  - *Build & Capture* — Reuse the last macOS Standalone build or Rebuild a Development/Metal one, set a
-    warm-up, choose the **Capture folder** (where `.gputrace` files are saved; blank = the package's
-    `Captures/`), then **Capture frame**.
-  - *Trace* — the **`.gputrace` path** (remembered between sessions), **Browse…** (file/folder picker),
-    **Open in Xcode** (opens the trace in Xcode's Metal debugger — convenience only), the
-    **Load GPU timing** and **Classify bottlenecks** toggles, the **Target frame rate**, and the
-    **Inspect trace** / **Ask AI Assistant for insights** actions.
-- **Summary** — Device, encoders/draws, **GPU frame time**, the **frame-budget gauge** vs your target
-  FPS, the top pass's **bottleneck**, and the **Top 3 insights** (each: what, measured evidence,
-  URP-specific fix, and a *quick win* tag).
-- **Details** — CPU/GPU frame time, counts, **GPU time by category**, and the **top GPU passes** with
-  their per-pass bottleneck (e.g. `↳ Fragment-shader-launch bound [Fragment Shader Launch 91%, …]`).
-- **Log** — verbose `gpucapture` / `gpudebug` output.
+**Left sidebar**
+- **Capture frame** — the global capture action. The **Capture settings** foldout holds the
+  environment checks (macOS ≥ 27, `gpucapture`/`gpudebug`, Metal active), Reuse-vs-Rebuild, warm-up,
+  Wait-for-signal, and the **Capture folder** (blank = `<Project>/MetalGpuCaptures`).
+- **Open .gputrace…** — inspect an existing trace from anywhere.
+- **Captures** — the `.gputrace` files in the capture folder (newest first; a `·` marks ones already
+  inspected). Click to select, double-click to inspect.
 
-**Capture tab** — environment checks, build/capture, capture folder, and trace input + actions:
+**Main area** (acts on the selected trace)
+- Actions: **Inspect**, **Ask AI**, **Copy report**, **Reveal**, **Open in Xcode**; an **Inspect
+  options** foldout (Load GPU timing, Classify bottlenecks, Target frame rate). A status line with an
+  elapsed timer and a **Cancel** button sits above the tabs.
+- **Summary** tab — Device, encoders/draws, **GPU frame time**, the **frame-budget gauge** vs your
+  target FPS, the top pass's **bottleneck**, and the **Top 3 insights**.
+- **Details** tab — counts, **GPU time by category**, and the **top GPU passes** with their per-pass
+  bottleneck (e.g. `↳ Fragment-shader-launch bound [Fragment Shader Launch 91%, …]`).
+- **Log** tab — verbose `gpucapture` / `gpudebug` output.
 
-![Capture tab](Documentation~/images/metal-gpu-capture-capture.png)
-
-**Details tab** — GPU time by category and the top GPU passes with their per-pass bottleneck:
+Selecting a different capture loads its **cached** inspection (or prompts you to Inspect it); the
+results, active tab, and cache survive Editor recompiles.
 
 ![Details tab](Documentation~/images/metal-gpu-capture-details.png)
 
-**Log tab** — the `gpucapture` / `gpudebug` commands that ran:
-
 ![Log tab](Documentation~/images/metal-gpu-capture-log.png)
 
-> Loading GPU timing runs `gpudebug profile load` (~15–20 s); classifying bottlenecks adds another
-> ~15–20 s. Turn either off for a fast structural inspect (counts + passes only). Settings (last
-> trace, capture folder, target FPS, toggles) persist via `EditorPrefs`.
+> Loading GPU timing runs `gpudebug profile load` (and `profile run --embed` for fresh captures);
+> classifying bottlenecks adds another pass. Turn either off (Inspect options) for a fast structural
+> inspect. Settings persist via `EditorPrefs`. Screenshots are regenerated via
+> `Tools > Metal GPU Capture > Generate Doc Screenshots`.
 
 ### With the AI Assistant
 Ask the Assistant to "capture a Metal frame and analyze it", or click **Ask AI Assistant for insights**

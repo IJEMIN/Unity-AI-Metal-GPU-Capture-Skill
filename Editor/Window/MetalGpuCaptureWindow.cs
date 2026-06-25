@@ -11,19 +11,19 @@ using UnityEngine.UIElements;
 namespace JeminLee.MetalGpuCaptureSkill.Editor
 {
     /// <summary>
-    /// Entry point A: human-driven dockable window, organized into tabs:
-    ///   Summary  - at-a-glance GPU frame time, budget gauge, Top 3 insights.
-    ///   Capture  - environment checks, build/capture controls, trace input + actions.
-    ///   Details  - full per-category breakdown, top GPU passes, counts, notes.
-    ///   Log      - verbose CLI log.
-    /// Tabs are a simple button-bar + page-swap (no TabView dependency). A persistent status row
-    /// (with an elapsed timer and a Cancel button) sits above the pages. Results and the active tab
-    /// survive domain reloads via [SerializeField]. After a capture/inspect the window shows Summary.
+    /// Entry point A: human-driven dockable window. Layout mirrors Unity's Memory Profiler:
+    ///   - LEFT sidebar: the global **Capture** action (+ a collapsible Capture-settings foldout) and
+    ///     the list of `.gputrace` files in the capture folder.
+    ///   - RIGHT main: the SELECTED trace's actions (Inspect / Ask AI / …) + per-trace TABS
+    ///     (Summary / Details / Log). Inspecting is cached per trace path, so clicking another capture
+    ///     shows its cached result (or a "click Inspect" prompt) instead of the previous trace's data.
+    /// A persistent status row (elapsed timer + Cancel) sits above the tabs. The active tab, the
+    /// selected trace, and the per-trace inspection cache survive domain reloads via [SerializeField].
     /// </summary>
     public class MetalGpuCaptureWindow : EditorWindow
     {
         const string AssistantMenuItem = "Window/AI/Assistant";
-        static readonly string[] TabNames = { "Summary", "Capture", "Details", "Log" };
+        static readonly string[] TabNames = { "Summary", "Details", "Log" };
 
         const string PrefTrace = "MetalGpuCapture.LastTracePath";
         const string PrefCaptureDir = "MetalGpuCapture.CaptureDir";
@@ -38,7 +38,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         VisualElement[] _pages;
         [SerializeField] int _activeTab;
 
-        // Capture page widgets
+        // Sidebar (capture) widgets
         VisualElement _envContainer;
         Label _lastBuildLabel;
         RadioButtonGroup _buildMode;
@@ -47,6 +47,10 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         TextField _captureDirField;
         Button _captureBtn;
         Button _recheckBtn;
+        VisualElement _captureListContainer;
+        ScrollView _sidebarScroll;
+
+        // Main (per-trace) widgets
         TextField _traceField;
         Button _browseBtn;
         Button _xcodeBtn;
@@ -66,8 +70,6 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         VisualElement _detailsContainer;
         ScrollView _logScroll;
         Label _logLabel;
-        VisualElement _captureListContainer;
-        ScrollView _sidebarScroll;
 
         string _existingBuild;
         bool _busy;
@@ -75,14 +77,17 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         double _busyStart;
         IVisualElementScheduledItem _busyTicker;
         CancellationTokenSource _cts;
+
+        // Currently displayed summary + per-trace inspection cache (keyed by summary.tracePath).
         [SerializeField] MetalTraceSummary _lastSummary;
+        [SerializeField] List<MetalTraceSummary> _inspections = new List<MetalTraceSummary>();
 
         [MenuItem("Window/Analysis/Metal GPU Capture")]
         public static void Open()
         {
             MetalGpuCaptureWindow w = GetWindow<MetalGpuCaptureWindow>();
             w.titleContent = new GUIContent("Metal GPU Capture");
-            w.minSize = new Vector2(720, 600);
+            w.minSize = new Vector2(740, 600);
             w.Show();
         }
 
@@ -100,19 +105,97 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             title.style.marginBottom = 6;
             root.Add(title);
 
-            // ---------- Body: left capture sidebar + main column ----------
             VisualElement body = Row();
             body.style.flexGrow = 1;
             root.Add(body);
 
+            BuildSidebar(body);
+            BuildMain(body);
+
+            int tab = Mathf.Clamp(_activeTab, 0, TabNames.Length - 1);
+            SelectTab(tab);
+            RefreshEnvironment();
+            RefreshBuildSection();
+            _lastSummary = FindInspection(_traceField.value);
+            ShowResults(_lastSummary);
+            UpdateButtons();
+            RefreshCaptureList();
+        }
+
+        // ---------- Layout ----------
+        void BuildSidebar(VisualElement body)
+        {
             VisualElement sidebar = new VisualElement();
-            sidebar.style.width = 230;
+            sidebar.style.width = 260;
             sidebar.style.flexShrink = 0;
             sidebar.style.marginRight = 8;
             sidebar.style.paddingRight = 6;
             sidebar.style.borderRightWidth = 1;
             sidebar.style.borderRightColor = new Color(1, 1, 1, 0.12f);
             body.Add(sidebar);
+
+            _captureBtn = new Button(OnCaptureClicked) { text = "Capture frame" };
+            _captureBtn.tooltip = "Build/reuse a macOS Standalone Metal build, launch it, and capture a .gputrace.";
+            _captureBtn.style.height = 26;
+            sidebar.Add(_captureBtn);
+
+            Foldout capFold = new Foldout { text = "Capture settings", value = false };
+            capFold.style.marginTop = 4;
+            sidebar.Add(capFold);
+
+            VisualElement envHeader = Row();
+            envHeader.style.justifyContent = Justify.SpaceBetween;
+            envHeader.style.alignItems = Align.Center;
+            envHeader.Add(SectionLabel("Environment"));
+            _recheckBtn = new Button(RefreshEnvironment) { text = "Re-check" };
+            envHeader.Add(_recheckBtn);
+            capFold.Add(envHeader);
+
+            _envContainer = new VisualElement();
+            _envContainer.style.marginTop = 4;
+            capFold.Add(_envContainer);
+
+            capFold.Add(Separator());
+
+            _lastBuildLabel = new Label();
+            _lastBuildLabel.style.whiteSpace = WhiteSpace.Normal;
+            _lastBuildLabel.style.marginBottom = 4;
+            capFold.Add(_lastBuildLabel);
+
+            _buildMode = new RadioButtonGroup(string.Empty,
+                new List<string> { "Reuse last build", "Rebuild (Development, Metal)" });
+            capFold.Add(_buildMode);
+
+            _warmup = new IntegerField("Warm-up (seconds)") { value = 10 };
+            _warmup.tooltip = "Time to let the player render a representative frame before capturing.";
+            _warmup.style.marginTop = 4;
+            capFold.Add(_warmup);
+
+            _waitSignal = new Toggle("Wait for signal (short-lived players)") { value = false };
+            _waitSignal.tooltip = "Sets MTLCAPTURE_WAIT_FOR_SIGNAL=1 for players that exit too quickly to attach.";
+            capFold.Add(_waitSignal);
+
+            _captureDirField = new TextField("Capture folder") { value = EditorPrefs.GetString(PrefCaptureDir, string.Empty) };
+            _captureDirField.tooltip = "Where .gputrace files are saved. Blank = <Project>/MetalGpuCaptures.";
+            _captureDirField.style.marginTop = 4;
+            _captureDirField.RegisterValueChangedCallback(e => { EditorPrefs.SetString(PrefCaptureDir, e.newValue); RefreshCaptureList(); });
+            capFold.Add(_captureDirField);
+            if (string.IsNullOrEmpty(_captureDirField.value))
+            {
+                // Default to <Project>/MetalGpuCaptures (resolved + persisted on first open).
+                try { _captureDirField.value = MetalCaptureService.CapturesDir(); } catch { }
+            }
+
+            Button browseDirBtn = new Button(OnBrowseCaptureDir) { text = "Choose capture folder…" };
+            browseDirBtn.style.marginTop = 2;
+            capFold.Add(browseDirBtn);
+
+            _browseBtn = new Button(OnBrowseClicked) { text = "Open .gputrace…" };
+            _browseBtn.tooltip = "Pick an existing .gputrace bundle to inspect.";
+            _browseBtn.style.marginTop = 4;
+            sidebar.Add(_browseBtn);
+
+            sidebar.Add(Separator());
 
             VisualElement sideHeader = Row();
             sideHeader.style.justifyContent = Justify.SpaceBetween;
@@ -129,29 +212,58 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _captureListContainer = new VisualElement();
             _sidebarScroll.Add(_captureListContainer);
             sidebar.Add(_sidebarScroll);
+        }
 
+        void BuildMain(VisualElement body)
+        {
             VisualElement main = new VisualElement();
             main.style.flexGrow = 1;
             body.Add(main);
 
-            // ---------- Tab bar ----------
-            VisualElement tabBar = Row();
-            tabBar.style.marginBottom = 6;
-            _tabButtons = new Button[TabNames.Length];
-            for (int i = 0; i < TabNames.Length; i++)
+            _traceField = new TextField("Selected .gputrace") { value = EditorPrefs.GetString(PrefTrace, string.Empty) };
+            _traceField.RegisterValueChangedCallback(e =>
             {
-                int idx = i;
-                Button b = new Button(() => SelectTab(idx)) { text = TabNames[i] };
-                b.style.flexGrow = 1;
-                b.style.marginRight = (i < TabNames.Length - 1) ? 2 : 0;
-                _tabButtons[i] = b;
-                tabBar.Add(b);
-            }
-            main.Add(tabBar);
+                EditorPrefs.SetString(PrefTrace, e.newValue);
+                _lastSummary = FindInspection(e.newValue);   // load cached inspection (or null)
+                ShowResults(_lastSummary);
+                UpdateButtons();
+                HighlightCaptureSelection();
+            });
+            main.Add(_traceField);
 
-            // ---------- Persistent status row (status + elapsed + cancel) ----------
+            VisualElement actions = Row();
+            actions.style.marginTop = 4;
+            _inspectBtn = AddAction(actions, "Inspect", OnInspectClicked, true);
+            _askAiBtn = AddAction(actions, "Ask AI", OnAskAiClicked, false);
+            _copyReportBtn = AddAction(actions, "Copy report", OnCopyReport, false);
+            _revealBtn = AddAction(actions, "Reveal", OnRevealClicked, false);
+            _xcodeBtn = AddAction(actions, "Open in Xcode", OnOpenInXcodeClicked, false);
+            main.Add(actions);
+
+            Foldout optFold = new Foldout { text = "Inspect options", value = false };
+            optFold.style.marginTop = 4;
+            main.Add(optFold);
+
+            _loadTiming = new Toggle("Load GPU timing (profile, ~15-20s)") { value = EditorPrefs.GetBool(PrefLoadTiming, true) };
+            _loadTiming.tooltip = "Runs `gpudebug profile load`/`profile run --embed` to read real GPU frame/pass time. Slower.";
+            _loadTiming.RegisterValueChangedCallback(e => EditorPrefs.SetBool(PrefLoadTiming, e.newValue));
+            optFold.Add(_loadTiming);
+
+            _classifyBottlenecks = new Toggle("Classify bottlenecks (GPU counters, +~15-20s)") { value = EditorPrefs.GetBool(PrefClassify, true) };
+            _classifyBottlenecks.tooltip = "Runs `info --all` on the top passes to find the GPU limiter " +
+                "(ALU / texture / fragment-launch / bandwidth). Requires GPU timing; adds another ~15-20s.";
+            _classifyBottlenecks.RegisterValueChangedCallback(e => EditorPrefs.SetBool(PrefClassify, e.newValue));
+            optFold.Add(_classifyBottlenecks);
+
+            _targetFps = new IntegerField("Target frame rate (fps)") { value = EditorPrefs.GetInt(PrefFps, 60) };
+            _targetFps.tooltip = "Used by the frame-budget gauge (60 fps = 16.67 ms, 90 = 11.1, 120 = 8.3).";
+            _targetFps.RegisterValueChangedCallback(e => { EditorPrefs.SetInt(PrefFps, e.newValue); if (_lastSummary != null) ShowResults(_lastSummary); });
+            optFold.Add(_targetFps);
+
+            // Persistent status row.
             VisualElement statusRow = Row();
             statusRow.style.alignItems = Align.Center;
+            statusRow.style.marginTop = 6;
             statusRow.style.marginBottom = 6;
             _statusLabel = new Label(string.Empty);
             _statusLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
@@ -168,166 +280,54 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             statusRow.Add(_cancelBtn);
             main.Add(statusRow);
 
-            // ---------- Pages ----------
+            // Tab bar.
+            VisualElement tabBar = Row();
+            _tabButtons = new Button[TabNames.Length];
+            for (int i = 0; i < TabNames.Length; i++)
+            {
+                int idx = i;
+                Button b = new Button(() => SelectTab(idx)) { text = TabNames[i] };
+                b.style.flexGrow = 1;
+                b.style.marginRight = (i < TabNames.Length - 1) ? 2 : 0;
+                _tabButtons[i] = b;
+                tabBar.Add(b);
+            }
+            main.Add(tabBar);
+
+            // Pages.
             ScrollView pageSummary = MakeScrollPage();
-            ScrollView pageCapture = MakeScrollPage();
             ScrollView pageDetails = MakeScrollPage();
             ScrollView pageLog = MakeScrollPage();
-            _pages = new VisualElement[] { pageSummary, pageCapture, pageDetails, pageLog };
+            _pages = new VisualElement[] { pageSummary, pageDetails, pageLog };
             main.Add(pageSummary);
-            main.Add(pageCapture);
             main.Add(pageDetails);
             main.Add(pageLog);
 
-            // --- Summary page ---
-            VisualElement sumHeader = Row();
-            sumHeader.style.justifyContent = Justify.SpaceBetween;
-            sumHeader.style.alignItems = Align.Center;
-            sumHeader.Add(SectionLabel("Summary"));
-            _copyReportBtn = new Button(OnCopyReport) { text = "Copy report" };
-            _copyReportBtn.tooltip = "Copy a Markdown report (frame time, breakdown, top passes, insights) to the clipboard.";
-            sumHeader.Add(_copyReportBtn);
-            pageSummary.Add(sumHeader);
             _summaryContainer = new VisualElement();
             _summaryContainer.style.marginTop = 4;
             pageSummary.Add(_summaryContainer);
 
-            // --- Capture page ---
-            VisualElement envHeader = Row();
-            envHeader.style.justifyContent = Justify.SpaceBetween;
-            envHeader.style.alignItems = Align.Center;
-            envHeader.Add(SectionLabel("Environment"));
-            _recheckBtn = new Button(RefreshEnvironment) { text = "Re-check" };
-            envHeader.Add(_recheckBtn);
-            pageCapture.Add(envHeader);
-
-            _envContainer = new VisualElement();
-            _envContainer.style.marginTop = 4;
-            pageCapture.Add(_envContainer);
-
-            pageCapture.Add(Separator());
-            pageCapture.Add(SectionLabel("Build & Capture"));
-
-            _lastBuildLabel = new Label();
-            _lastBuildLabel.style.whiteSpace = WhiteSpace.Normal;
-            _lastBuildLabel.style.marginBottom = 4;
-            pageCapture.Add(_lastBuildLabel);
-
-            _buildMode = new RadioButtonGroup(string.Empty,
-                new List<string> { "Reuse last build", "Rebuild (Development, Metal)" });
-            pageCapture.Add(_buildMode);
-
-            _warmup = new IntegerField("Warm-up (seconds)") { value = 10 };
-            _warmup.tooltip = "Time to let the player render a representative frame before capturing.";
-            _warmup.style.marginTop = 4;
-            pageCapture.Add(_warmup);
-
-            _waitSignal = new Toggle("Wait for signal (short-lived players)") { value = false };
-            _waitSignal.tooltip = "Sets MTLCAPTURE_WAIT_FOR_SIGNAL=1 for players that exit too quickly to attach.";
-            pageCapture.Add(_waitSignal);
-
-            _captureDirField = new TextField("Capture folder") { value = EditorPrefs.GetString(PrefCaptureDir, string.Empty) };
-            _captureDirField.tooltip = "Where .gputrace files are saved. Blank = the package's Captures/ folder.";
-            _captureDirField.style.marginTop = 4;
-            _captureDirField.RegisterValueChangedCallback(e => { EditorPrefs.SetString(PrefCaptureDir, e.newValue); RefreshCaptureList(); });
-            pageCapture.Add(_captureDirField);
-            if (string.IsNullOrEmpty(_captureDirField.value))
-            {
-                // Default to the package's Captures/ folder (resolved + persisted on first open).
-                try { _captureDirField.value = MetalCaptureService.CapturesDir(); } catch { }
-            }
-
-            Button browseDirBtn = new Button(OnBrowseCaptureDir) { text = "Choose capture folder…" };
-            browseDirBtn.style.marginTop = 2;
-            pageCapture.Add(browseDirBtn);
-
-            _captureBtn = new Button(OnCaptureClicked) { text = "Capture frame" };
-            _captureBtn.tooltip = "Build/reuse a macOS Standalone Metal build, launch it, and capture a .gputrace.";
-            _captureBtn.style.marginTop = 6;
-            _captureBtn.style.height = 26;
-            pageCapture.Add(_captureBtn);
-
-            pageCapture.Add(Separator());
-            pageCapture.Add(SectionLabel("Trace"));
-
-            _traceField = new TextField(".gputrace path") { value = EditorPrefs.GetString(PrefTrace, string.Empty) };
-            _traceField.style.marginTop = 4;
-            _traceField.RegisterValueChangedCallback(e => { EditorPrefs.SetString(PrefTrace, e.newValue); UpdateButtons(); HighlightCaptureSelection(); });
-            pageCapture.Add(_traceField);
-
-            VisualElement traceBtns = Row();
-            traceBtns.style.marginTop = 4;
-            _browseBtn = new Button(OnBrowseClicked) { text = "Browse…" };
-            _browseBtn.style.flexGrow = 1;
-            _browseBtn.tooltip = "Pick a .gputrace bundle (or paste/type the path in the field).";
-            traceBtns.Add(_browseBtn);
-            _revealBtn = new Button(OnRevealClicked) { text = "Reveal in Finder" };
-            _revealBtn.style.flexGrow = 1;
-            _revealBtn.style.marginLeft = 4;
-            _revealBtn.tooltip = "Show the current .gputrace in Finder.";
-            traceBtns.Add(_revealBtn);
-            _xcodeBtn = new Button(OnOpenInXcodeClicked) { text = "Open in Xcode" };
-            _xcodeBtn.style.flexGrow = 1;
-            _xcodeBtn.style.marginLeft = 4;
-            _xcodeBtn.tooltip = "Open the current .gputrace in Xcode's Metal debugger (convenience only).";
-            traceBtns.Add(_xcodeBtn);
-            pageCapture.Add(traceBtns);
-
-            _loadTiming = new Toggle("Load GPU timing (profile, ~15-20s)") { value = EditorPrefs.GetBool(PrefLoadTiming, true) };
-            _loadTiming.tooltip = "Runs `gpudebug profile load` to read real GPU frame/pass time. Slower.";
-            _loadTiming.style.marginTop = 4;
-            _loadTiming.RegisterValueChangedCallback(e => EditorPrefs.SetBool(PrefLoadTiming, e.newValue));
-            pageCapture.Add(_loadTiming);
-
-            _classifyBottlenecks = new Toggle("Classify bottlenecks (GPU counters, +~15-20s)") { value = EditorPrefs.GetBool(PrefClassify, true) };
-            _classifyBottlenecks.tooltip = "Runs `info --all` on the top passes to find the GPU limiter " +
-                "(ALU / texture / fragment-launch / bandwidth). Requires GPU timing; adds another ~15-20s.";
-            _classifyBottlenecks.style.marginTop = 2;
-            _classifyBottlenecks.RegisterValueChangedCallback(e => EditorPrefs.SetBool(PrefClassify, e.newValue));
-            pageCapture.Add(_classifyBottlenecks);
-
-            _targetFps = new IntegerField("Target frame rate (fps)") { value = EditorPrefs.GetInt(PrefFps, 60) };
-            _targetFps.tooltip = "Used by the frame-budget gauge (60 fps = 16.67 ms, 90 = 11.1, 120 = 8.3).";
-            _targetFps.style.marginTop = 2;
-            _targetFps.RegisterValueChangedCallback(e => { EditorPrefs.SetInt(PrefFps, e.newValue); if (_lastSummary != null) ShowResults(_lastSummary); });
-            pageCapture.Add(_targetFps);
-
-            VisualElement resultBtns = Row();
-            resultBtns.style.marginTop = 4;
-            _inspectBtn = new Button(OnInspectClicked) { text = "Inspect trace" };
-            _inspectBtn.style.flexGrow = 1;
-            _inspectBtn.style.height = 24;
-            resultBtns.Add(_inspectBtn);
-            _askAiBtn = new Button(OnAskAiClicked) { text = "Ask AI Assistant for insights" };
-            _askAiBtn.style.flexGrow = 1;
-            _askAiBtn.style.height = 24;
-            _askAiBtn.style.marginLeft = 4;
-            resultBtns.Add(_askAiBtn);
-            pageCapture.Add(resultBtns);
-
-            // --- Details page ---
-            pageDetails.Add(SectionLabel("Details"));
             _detailsContainer = new VisualElement();
             _detailsContainer.style.marginTop = 4;
             pageDetails.Add(_detailsContainer);
 
-            // --- Log page ---
-            pageLog.Add(SectionLabel("Log"));
             _logScroll = new ScrollView(ScrollViewMode.Vertical);
             _logScroll.style.flexGrow = 1;
-            _logScroll.style.marginTop = 4;
             _logLabel = new Label(string.Empty);
             _logLabel.style.whiteSpace = WhiteSpace.Normal;
             _logLabel.selection.isSelectable = true;
             _logScroll.Add(_logLabel);
             pageLog.Add(_logScroll);
+        }
 
-            SelectTab(_activeTab);          // restored across domain reload (default 0 = Summary)
-            RefreshEnvironment();
-            RefreshBuildSection();
-            ShowResults(_lastSummary);      // restored across domain reload (else null -> hints)
-            UpdateButtons();
-            RefreshCaptureList();
+        static Button AddAction(VisualElement row, string text, Action onClick, bool first)
+        {
+            Button b = new Button(onClick) { text = text };
+            b.style.flexGrow = 1;
+            b.style.height = 24;
+            if (!first) b.style.marginLeft = 4;
+            row.Add(b);
+            return b;
         }
 
         // ---------- Tabs ----------
@@ -349,6 +349,23 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             ScrollView sv = new ScrollView(ScrollViewMode.Vertical);
             sv.style.flexGrow = 1;
             return sv;
+        }
+
+        // ---------- Inspection cache (per trace path) ----------
+        MetalTraceSummary FindInspection(string path)
+        {
+            if (string.IsNullOrEmpty(path) || _inspections == null) return null;
+            foreach (MetalTraceSummary s in _inspections)
+                if (s != null && s.tracePath == path) return s;
+            return null;
+        }
+
+        void StoreInspection(MetalTraceSummary s)
+        {
+            if (s == null || string.IsNullOrEmpty(s.tracePath)) return;
+            if (_inspections == null) _inspections = new List<MetalTraceSummary>();
+            _inspections.RemoveAll(x => x == null || x.tracePath == s.tracePath);
+            _inspections.Add(s);
         }
 
         // ---------- Capture sidebar list ----------
@@ -382,6 +399,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 string when;
                 try { when = System.IO.Directory.GetLastWriteTime(path).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture); }
                 catch { when = string.Empty; }
+                bool cached = FindInspection(path) != null;
 
                 VisualElement rowEl = new VisualElement();
                 rowEl.userData = path;
@@ -392,7 +410,8 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 rowEl.style.borderBottomLeftRadius = 3; rowEl.style.borderBottomRightRadius = 3;
                 rowEl.tooltip = path + "\n(click to select, double-click to inspect)";
 
-                Label nameL = new Label(name);
+                Label nameL = new Label(name + (cached ? "  ·" : string.Empty));
+                nameL.tooltip = cached ? "Inspected (cached)" : "Not inspected yet";
                 nameL.style.whiteSpace = WhiteSpace.Normal;
                 rowEl.Add(nameL);
                 Label whenL = new Label(when);
@@ -403,7 +422,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 string captured = path;
                 rowEl.RegisterCallback<ClickEvent>(evt =>
                 {
-                    _traceField.value = captured;   // -> persist, UpdateButtons, HighlightCaptureSelection
+                    _traceField.value = captured;   // -> load cache, ShowResults, UpdateButtons, highlight
                     if (evt.clickCount >= 2 && !_busy) OnInspectClicked();
                 });
 
@@ -443,6 +462,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 : "Some checks failed - capture may not work.");
             summary.style.marginTop = 6;
             summary.style.unityFontStyleAndWeight = FontStyle.Bold;
+            summary.style.whiteSpace = WhiteSpace.Normal;
             summary.style.color = status.AllPass
                 ? new Color(0.40f, 0.80f, 0.40f)
                 : new Color(0.90f, 0.60f, 0.30f);
@@ -466,7 +486,6 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _envContainer.Add(row);
         }
 
-        // ---------- Build section ----------
         void RefreshBuildSection()
         {
             _existingBuild = MetalBuildService.FindExistingBuild();
@@ -549,7 +568,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (_busy) return;
             string path = _traceField.value;
             if (string.IsNullOrEmpty(path) || !(System.IO.File.Exists(path) || System.IO.Directory.Exists(path)))
-            { _statusLabel.text = "Set a valid .gputrace path first."; return; }
+            { _statusLabel.text = "Select a capture on the left (or set a valid .gputrace path) first."; return; }
             _cts = new CancellationTokenSource();
             SetBusy(true);
             try { await InspectAndShow(path); }
@@ -560,6 +579,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 if (_cts != null && _cts.IsCancellationRequested) _statusLabel.text = "Canceled.";
                 SetBusy(false);
                 _cts?.Dispose(); _cts = null;
+                RefreshCaptureList();
             }
         }
 
@@ -568,10 +588,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             bool timing = _loadTiming != null && _loadTiming.value;
             bool classify = timing && _classifyBottlenecks != null && _classifyBottlenecks.value;
             _statusLabel.text = !timing ? "Inspecting trace..."
-                : (classify ? "Inspecting + GPU timing + bottlenecks (~30-40s)..." : "Inspecting + loading GPU timing (~15-20s)...");
+                : (classify ? "Inspecting + GPU timing + bottlenecks (~30-60s)..." : "Inspecting + loading GPU timing (~15-30s)...");
             CancellationToken tok = _cts != null ? _cts.Token : default;
             MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog, timing, classify, tok).ConfigureAwait(true);
             _lastSummary = sum;
+            if (sum.success) StoreInspection(sum);
             ShowResults(sum);
             UpdateButtons();
             _statusLabel.text = sum.success ? "Inspection complete." : ("Inspection failed: " + sum.error);
@@ -594,7 +615,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             string tracePath = _traceField.value;
             if (string.IsNullOrEmpty(tracePath))
             {
-                _statusLabel.text = "No trace to analyze. Capture or set a .gputrace path first.";
+                _statusLabel.text = "No trace to analyze. Select or capture a .gputrace first.";
                 return;
             }
 
@@ -616,9 +637,8 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 }
 
                 AppendLog("Sending insight prompt to the AI Assistant...");
-                // Run() runs the Assistant with its own UI directly — no inline prompt popup. We avoid
-                // PromptThenRun: its popup appears *below* the anchor, embedded in this EditorWindow, so
-                // its submit button gets clipped at the window's bottom edge.
+                // Run() runs the Assistant with its own UI directly — no inline prompt popup (which
+                // appears below the anchor, embedded in this window, with its submit button clipped).
                 await Unity.AI.Assistant.Editor.Api.AssistantApi.Run(prompt, ctx).ConfigureAwait(true);
                 launched = true;
             }
@@ -697,16 +717,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         void OnBrowseClicked()
         {
             string start = GetBrowseStartDir();
-            // .gputrace is a macOS bundle directory: OpenFilePanel selects it when it's registered as
-            // a package; otherwise fall back to a folder picker.
             string picked = EditorUtility.OpenFilePanel("Select .gputrace", start, "gputrace");
             if (string.IsNullOrEmpty(picked))
                 picked = EditorUtility.OpenFolderPanel("Select .gputrace bundle", start, string.Empty);
             if (!string.IsNullOrEmpty(picked))
-            {
-                _traceField.value = picked;
-                UpdateButtons();
-            }
+                _traceField.value = picked; // callback loads cache + updates everything
         }
 
         void OnRevealClicked()
@@ -721,10 +736,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         {
             string path = _traceField != null ? _traceField.value : null;
             if (string.IsNullOrEmpty(path) || !(System.IO.File.Exists(path) || System.IO.Directory.Exists(path)))
-            {
-                _statusLabel.text = "No valid .gputrace to open. Set a path first.";
-                return;
-            }
+            { _statusLabel.text = "No valid .gputrace to open. Set a path first."; return; }
             try
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
@@ -756,6 +768,8 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 }
                 catch { }
             }
+            string folder = _captureDirField != null ? _captureDirField.value : null;
+            if (!string.IsNullOrEmpty(folder) && System.IO.Directory.Exists(folder)) return folder;
             return System.IO.Directory.GetCurrentDirectory();
         }
 
@@ -820,12 +834,21 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             ShowDetails(s);
         }
 
+        string NoSummaryHint()
+        {
+            string tp = _traceField != null ? _traceField.value : null;
+            bool exists = !string.IsNullOrEmpty(tp) && (System.IO.File.Exists(tp) || System.IO.Directory.Exists(tp));
+            return exists
+                ? "This capture isn't inspected yet — click Inspect to analyze it."
+                : "Select a capture on the left, or capture a new frame.";
+        }
+
         void ShowSummary(MetalTraceSummary s)
         {
             if (_summaryContainer == null) return;
             _summaryContainer.Clear();
 
-            if (s == null) { _summaryContainer.Add(Hint("Capture a frame (Capture tab) or inspect a .gputrace to see a summary.")); return; }
+            if (s == null) { _summaryContainer.Add(Hint(NoSummaryHint())); return; }
             if (!s.success) { _summaryContainer.Add(new Label("Error: " + s.error)); return; }
 
             _summaryContainer.Add(KV("Device", s.device));
@@ -833,7 +856,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _summaryContainer.Add(KV("GPU frame time",
                 s.gpuFrameTimeAvailable
                     ? s.gpuFrameMs.ToString("F2", CultureInfo.InvariantCulture) + " ms"
-                    : "unavailable (enable 'Load GPU timing' on the Capture tab)"));
+                    : "unavailable (enable 'Load GPU timing' in Inspect options)"));
 
             if (s.gpuTimingLoaded)
             {
@@ -845,7 +868,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             else
             {
                 _summaryContainer.Add(Hint(string.IsNullOrEmpty(s.timingNote)
-                    ? "Enable 'Load GPU timing' (Capture tab) for the budget gauge and Top 3 insights."
+                    ? "Enable 'Load GPU timing' (Inspect options) for the budget gauge and Top 3 insights."
                     : s.timingNote));
             }
         }
@@ -855,7 +878,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (_detailsContainer == null) return;
             _detailsContainer.Clear();
 
-            if (s == null) { _detailsContainer.Add(Hint("No trace inspected yet.")); return; }
+            if (s == null) { _detailsContainer.Add(Hint(NoSummaryHint())); return; }
             if (!s.success) { _detailsContainer.Add(new Label("Error: " + s.error)); return; }
 
             _detailsContainer.Add(KV("Device", s.device));
@@ -966,7 +989,6 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             h.style.marginTop = 6;
             c.Add(h);
 
-            // Bar fills to 50% at target, 100% at 2x target.
             float frac = target > 0 ? (float)Math.Min(frame / target, 2.0) / 2f : 0f;
             VisualElement track = new VisualElement();
             track.style.height = 16;
@@ -1135,7 +1157,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 ? _captureDirField.value : System.IO.Directory.GetCurrentDirectory();
             string picked = EditorUtility.OpenFolderPanel("Choose capture output folder", start, string.Empty);
             if (!string.IsNullOrEmpty(picked))
-                _captureDirField.value = picked; // RegisterValueChangedCallback persists it
+                _captureDirField.value = picked; // RegisterValueChangedCallback persists it + refreshes list
         }
 
         // ---------- UI builders ----------
