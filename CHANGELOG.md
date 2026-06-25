@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-25
+
 ### Added
 - Real GPU frame & per-pass timing via `gpudebug profile load`; frame-budget gauge, URP-category
   breakdown, deterministic Top-3 insights, and per-pass GPU bottleneck classification (perf limiters).

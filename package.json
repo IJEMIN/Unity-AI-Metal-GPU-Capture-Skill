@@ -1,6 +1,6 @@
 {
   "name": "com.jeminlee.metal-gpu-capture-skill",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Metal GPU Capture Skill (Unity AI Assistant)",
   "description": "Unity AI Assistant skill package that drives macOS 27 'gpucapture'/'gpudebug' to capture a Metal GPU frame from a Unity macOS Standalone build (built on demand or attached to a running build), then interprets the .gputrace in Unity project context (SRP pass / shader / material / profiler markers) and surfaces performance-optimization insights.",
   "unity": "6000.0",
