@@ -12,10 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tabbed window (Summary / Capture / Details / Log) with Browse… and Open-in-Xcode buttons.
 - Configurable capture output folder; the last `.gputrace` path and settings persist via `EditorPrefs`.
 - README usage guide + window screenshots (Summary / Capture / Details / Log).
+- Usability: **Cancel** button + elapsed-time timer for long capture/inspect; results and the active
+  tab **persist across domain reloads**; **Reveal in Finder** and **Copy report** (Markdown) buttons;
+  buttons are gated on trace existence and on the capture environment.
 
 ### Fixed
 - `get_timeSinceStartup` error on Inspect: log callbacks from background threads now marshal to the
   main thread before touching the UI Toolkit scheduler.
+- Ask-AI prompt popup's submit button was clipped by the window; insights now go straight to the
+  Assistant via `AssistantApi.Run` (no inline popup).
 
 ## [0.1.0] - 2026-06-23
 

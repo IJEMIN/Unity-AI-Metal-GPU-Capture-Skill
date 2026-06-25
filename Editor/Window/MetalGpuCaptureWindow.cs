@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
@@ -15,8 +16,9 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
     ///   Capture  - environment checks, build/capture controls, trace input + actions.
     ///   Details  - full per-category breakdown, top GPU passes, counts, notes.
     ///   Log      - verbose CLI log.
-    /// Tabs are a simple button-bar + page-swap (no TabView dependency). The status line is
-    /// persistent across tabs. After a capture/inspect the window auto-switches to Summary.
+    /// Tabs are a simple button-bar + page-swap (no TabView dependency). A persistent status row
+    /// (with an elapsed timer and a Cancel button) sits above the pages. Results and the active tab
+    /// survive domain reloads via [SerializeField]. After a capture/inspect the window shows Summary.
     /// </summary>
     public class MetalGpuCaptureWindow : EditorWindow
     {
@@ -29,12 +31,12 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         const string PrefLoadTiming = "MetalGpuCapture.LoadTiming";
         const string PrefClassify = "MetalGpuCapture.ClassifyBottlenecks";
 
-        System.Threading.SynchronizationContext _mainCtx;
+        SynchronizationContext _mainCtx;
 
         // Tabs
         Button[] _tabButtons;
         VisualElement[] _pages;
-        int _activeTab;
+        [SerializeField] int _activeTab;
 
         // Capture page widgets
         VisualElement _envContainer;
@@ -48,14 +50,18 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         TextField _traceField;
         Button _browseBtn;
         Button _xcodeBtn;
+        Button _revealBtn;
         Toggle _loadTiming;
         Toggle _classifyBottlenecks;
         IntegerField _targetFps;
         Button _inspectBtn;
         Button _askAiBtn;
+        Button _copyReportBtn;
 
         // Persistent + result pages
         Label _statusLabel;
+        Label _elapsedLabel;
+        Button _cancelBtn;
         VisualElement _summaryContainer;
         VisualElement _detailsContainer;
         ScrollView _logScroll;
@@ -63,7 +69,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
         string _existingBuild;
         bool _busy;
-        MetalTraceSummary _lastSummary;
+        bool _gpucaptureAvailable;
+        double _busyStart;
+        IVisualElementScheduledItem _busyTicker;
+        CancellationTokenSource _cts;
+        [SerializeField] MetalTraceSummary _lastSummary;
 
         [MenuItem("Window/Analysis/Metal GPU Capture")]
         public static void Open()
@@ -76,7 +86,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
         void CreateGUI()
         {
-            _mainCtx = System.Threading.SynchronizationContext.Current;
+            _mainCtx = SynchronizationContext.Current;
 
             VisualElement root = rootVisualElement;
             root.style.paddingLeft = 8; root.style.paddingRight = 8;
@@ -103,12 +113,24 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             }
             root.Add(tabBar);
 
-            // ---------- Persistent status ----------
+            // ---------- Persistent status row (status + elapsed + cancel) ----------
+            VisualElement statusRow = Row();
+            statusRow.style.alignItems = Align.Center;
+            statusRow.style.marginBottom = 6;
             _statusLabel = new Label(string.Empty);
             _statusLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
             _statusLabel.style.whiteSpace = WhiteSpace.Normal;
-            _statusLabel.style.marginBottom = 6;
-            root.Add(_statusLabel);
+            _statusLabel.style.flexGrow = 1;
+            statusRow.Add(_statusLabel);
+            _elapsedLabel = new Label(string.Empty);
+            _elapsedLabel.style.marginLeft = 6;
+            _elapsedLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
+            statusRow.Add(_elapsedLabel);
+            _cancelBtn = new Button(OnCancel) { text = "Cancel" };
+            _cancelBtn.style.marginLeft = 6;
+            _cancelBtn.style.display = DisplayStyle.None;
+            statusRow.Add(_cancelBtn);
+            root.Add(statusRow);
 
             // ---------- Pages ----------
             ScrollView pageSummary = MakeScrollPage();
@@ -122,7 +144,14 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             root.Add(pageLog);
 
             // --- Summary page ---
-            pageSummary.Add(SectionLabel("Summary"));
+            VisualElement sumHeader = Row();
+            sumHeader.style.justifyContent = Justify.SpaceBetween;
+            sumHeader.style.alignItems = Align.Center;
+            sumHeader.Add(SectionLabel("Summary"));
+            _copyReportBtn = new Button(OnCopyReport) { text = "Copy report" };
+            _copyReportBtn.tooltip = "Copy a Markdown report (frame time, breakdown, top passes, insights) to the clipboard.";
+            sumHeader.Add(_copyReportBtn);
+            pageSummary.Add(sumHeader);
             _summaryContainer = new VisualElement();
             _summaryContainer.style.marginTop = 4;
             pageSummary.Add(_summaryContainer);
@@ -172,6 +201,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             pageCapture.Add(browseDirBtn);
 
             _captureBtn = new Button(OnCaptureClicked) { text = "Capture frame" };
+            _captureBtn.tooltip = "Build/reuse a macOS Standalone Metal build, launch it, and capture a .gputrace.";
             _captureBtn.style.marginTop = 6;
             _captureBtn.style.height = 26;
             pageCapture.Add(_captureBtn);
@@ -181,7 +211,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
             _traceField = new TextField(".gputrace path") { value = EditorPrefs.GetString(PrefTrace, string.Empty) };
             _traceField.style.marginTop = 4;
-            _traceField.RegisterValueChangedCallback(e => { EditorPrefs.SetString(PrefTrace, e.newValue); UpdateAskAiEnabled(); });
+            _traceField.RegisterValueChangedCallback(e => { EditorPrefs.SetString(PrefTrace, e.newValue); UpdateButtons(); });
             pageCapture.Add(_traceField);
 
             VisualElement traceBtns = Row();
@@ -190,6 +220,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _browseBtn.style.flexGrow = 1;
             _browseBtn.tooltip = "Pick a .gputrace bundle (or paste/type the path in the field).";
             traceBtns.Add(_browseBtn);
+            _revealBtn = new Button(OnRevealClicked) { text = "Reveal in Finder" };
+            _revealBtn.style.flexGrow = 1;
+            _revealBtn.style.marginLeft = 4;
+            _revealBtn.tooltip = "Show the current .gputrace in Finder.";
+            traceBtns.Add(_revealBtn);
             _xcodeBtn = new Button(OnOpenInXcodeClicked) { text = "Open in Xcode" };
             _xcodeBtn.style.flexGrow = 1;
             _xcodeBtn.style.marginLeft = 4;
@@ -246,11 +281,11 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _logScroll.Add(_logLabel);
             pageLog.Add(_logScroll);
 
-            SelectTab(0);
+            SelectTab(_activeTab);          // restored across domain reload (default 0 = Summary)
             RefreshEnvironment();
             RefreshBuildSection();
-            ShowResults(null);
-            UpdateAskAiEnabled();
+            ShowResults(_lastSummary);      // restored across domain reload (else null -> hints)
+            UpdateButtons();
         }
 
         // ---------- Tabs ----------
@@ -295,6 +330,9 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 ? new Color(0.40f, 0.80f, 0.40f)
                 : new Color(0.90f, 0.60f, 0.30f);
             _envContainer.Add(summary);
+
+            _gpucaptureAvailable = status.gpucapture.pass;
+            UpdateButtons();
         }
 
         void AddCheckRow(EnvironmentCheck check)
@@ -333,6 +371,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         async void OnCaptureClicked()
         {
             if (_busy) return;
+            _cts = new CancellationTokenSource();
             SetBusy(true);
             ClearLog();
 
@@ -343,7 +382,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
                 if (rebuild)
                 {
-                    _statusLabel.text = "Building... (Editor unresponsive during build)";
+                    _statusLabel.text = "Building... (Editor unresponsive during build; cannot cancel)";
                     AppendLog("Building macOS Standalone (Development, Metal)...");
                     MetalBuildResult b = MetalBuildService.BuildStandalonePlayer();
                     AppendLog(b.summary);
@@ -362,7 +401,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 string outDir = _captureDirField != null ? _captureDirField.value : null;
                 MetalCaptureResult cap = await MetalCaptureService.CaptureAsync(
                     appPath, warm, _waitSignal.value, AppendLog,
-                    string.IsNullOrEmpty(outDir) ? null : outDir).ConfigureAwait(true);
+                    string.IsNullOrEmpty(outDir) ? null : outDir, _cts.Token).ConfigureAwait(true);
 
                 if (cap.success)
                 {
@@ -375,8 +414,15 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                     _statusLabel.text = "Capture failed: " + cap.error;
                 }
             }
+            catch (OperationCanceledException) { _statusLabel.text = "Canceled."; AppendLog("Operation canceled."); }
             catch (Exception e) { _statusLabel.text = "Error: " + e.Message; AppendLog(e.ToString()); }
-            finally { SetBusy(false); RefreshBuildSection(); }
+            finally
+            {
+                if (_cts != null && _cts.IsCancellationRequested) _statusLabel.text = "Canceled.";
+                SetBusy(false);
+                _cts?.Dispose(); _cts = null;
+                RefreshBuildSection();
+            }
         }
 
         // ---------- Inspect ----------
@@ -384,11 +430,19 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         {
             if (_busy) return;
             string path = _traceField.value;
-            if (string.IsNullOrEmpty(path)) { _statusLabel.text = "Enter a .gputrace path first."; return; }
+            if (string.IsNullOrEmpty(path) || !(System.IO.File.Exists(path) || System.IO.Directory.Exists(path)))
+            { _statusLabel.text = "Set a valid .gputrace path first."; return; }
+            _cts = new CancellationTokenSource();
             SetBusy(true);
             try { await InspectAndShow(path); }
+            catch (OperationCanceledException) { _statusLabel.text = "Canceled."; }
             catch (Exception e) { _statusLabel.text = "Inspect error: " + e.Message; AppendLog(e.ToString()); }
-            finally { SetBusy(false); }
+            finally
+            {
+                if (_cts != null && _cts.IsCancellationRequested) _statusLabel.text = "Canceled.";
+                SetBusy(false);
+                _cts?.Dispose(); _cts = null;
+            }
         }
 
         async Task InspectAndShow(string tracePath)
@@ -397,12 +451,23 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             bool classify = timing && _classifyBottlenecks != null && _classifyBottlenecks.value;
             _statusLabel.text = !timing ? "Inspecting trace..."
                 : (classify ? "Inspecting + GPU timing + bottlenecks (~30-40s)..." : "Inspecting + loading GPU timing (~15-20s)...");
-            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog, timing, classify).ConfigureAwait(true);
+            CancellationToken tok = _cts != null ? _cts.Token : default;
+            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog, timing, classify, tok).ConfigureAwait(true);
             _lastSummary = sum;
             ShowResults(sum);
-            UpdateAskAiEnabled();
+            UpdateButtons();
             _statusLabel.text = sum.success ? "Inspection complete." : ("Inspection failed: " + sum.error);
             if (sum.success) SelectTab(0); // jump to Summary
+        }
+
+        void OnCancel()
+        {
+            if (_cts != null && !_cts.IsCancellationRequested)
+            {
+                _cts.Cancel();
+                _statusLabel.text = "Canceling…";
+                AppendLog("Cancel requested.");
+            }
         }
 
         // ---------- Ask AI Assistant ----------
@@ -495,14 +560,22 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             return sb.ToString();
         }
 
-        void UpdateAskAiEnabled()
+        // ---------- Button gating ----------
+        void UpdateButtons()
         {
-            bool hasTrace = !string.IsNullOrEmpty(_traceField != null ? _traceField.value : null);
-            if (_askAiBtn != null) _askAiBtn.SetEnabled(!_busy && hasTrace);
-            if (_xcodeBtn != null) _xcodeBtn.SetEnabled(hasTrace);
+            string tp = _traceField != null ? _traceField.value : null;
+            bool hasTrace = !string.IsNullOrEmpty(tp);
+            bool traceExists = hasTrace && (System.IO.File.Exists(tp) || System.IO.Directory.Exists(tp));
+
+            if (_captureBtn != null) _captureBtn.SetEnabled(!_busy && _gpucaptureAvailable);
+            if (_inspectBtn != null) _inspectBtn.SetEnabled(!_busy && traceExists);
+            if (_askAiBtn != null) _askAiBtn.SetEnabled(!_busy && traceExists);
+            if (_xcodeBtn != null) _xcodeBtn.SetEnabled(traceExists);
+            if (_revealBtn != null) _revealBtn.SetEnabled(traceExists);
+            if (_copyReportBtn != null) _copyReportBtn.SetEnabled(_lastSummary != null && _lastSummary.success);
         }
 
-        // ---------- Browse / Open in Xcode ----------
+        // ---------- Trace conveniences ----------
         void OnBrowseClicked()
         {
             string start = GetBrowseStartDir();
@@ -514,8 +587,16 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (!string.IsNullOrEmpty(picked))
             {
                 _traceField.value = picked;
-                UpdateAskAiEnabled();
+                UpdateButtons();
             }
+        }
+
+        void OnRevealClicked()
+        {
+            string path = _traceField != null ? _traceField.value : null;
+            if (string.IsNullOrEmpty(path) || !(System.IO.File.Exists(path) || System.IO.Directory.Exists(path)))
+            { _statusLabel.text = "No valid .gputrace to reveal."; return; }
+            EditorUtility.RevealInFinder(path);
         }
 
         void OnOpenInXcodeClicked()
@@ -558,6 +639,60 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 catch { }
             }
             return System.IO.Directory.GetCurrentDirectory();
+        }
+
+        void OnCopyReport()
+        {
+            if (_lastSummary == null || !_lastSummary.success)
+            { _statusLabel.text = "Nothing to copy yet — inspect a trace first."; return; }
+            EditorGUIUtility.systemCopyBuffer = BuildTextReport(_lastSummary);
+            _statusLabel.text = "Report copied to clipboard.";
+        }
+
+        string BuildTextReport(MetalTraceSummary s)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("# Metal GPU Capture report");
+            sb.AppendLine("Trace: " + s.tracePath);
+            sb.AppendLine("Device: " + s.device);
+            sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
+                "Command buffers / encoders / draws: {0} / {1} / {2}", s.commandBufferCount, s.encoderCount, s.drawCallCount));
+            if (s.gpuFrameTimeAvailable)
+                sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "GPU frame time: {0:F2} ms", s.gpuFrameMs));
+            sb.AppendLine("CPU frame time: " + (s.cpuFrameTimeAvailable
+                ? s.cpuFrameMs.ToString("F2", CultureInfo.InvariantCulture) + " ms"
+                : "unavailable (not in a GPU trace)"));
+
+            if (s.gpuTimingLoaded)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## GPU time by category");
+                foreach (CategoryCost c in MetalInsights.Breakdown(s))
+                    sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "- {0}: {1:F2} ms ({2:F0}%)", c.category, c.ms, c.percent));
+
+                sb.AppendLine();
+                sb.AppendLine("## Top GPU passes");
+                int n = Mathf.Min(8, s.gpuPasses.Count);
+                for (int i = 0; i < n; i++)
+                {
+                    MetalPassInfo p = s.gpuPasses[i];
+                    sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "- {0}: {1:F2} ms ({2:F1}%)", p.label, p.gpuMs, p.costPercent));
+                    if (!string.IsNullOrEmpty(p.bottleneck))
+                        sb.AppendLine("  - bottleneck: " + p.bottleneck + (string.IsNullOrEmpty(p.bottleneckDetail) ? "" : " [" + p.bottleneckDetail + "]"));
+                }
+
+                sb.AppendLine();
+                sb.AppendLine("## Top 3 insights");
+                List<MetalInsight> ins = MetalInsights.TopInsights(s, 3);
+                for (int i = 0; i < ins.Count; i++)
+                {
+                    MetalInsight it = ins[i];
+                    sb.AppendLine(string.Format("{0}. {1}{2}", i + 1, it.title, it.quickWin ? " [quick win]" : ""));
+                    sb.AppendLine("   Evidence: " + it.evidence);
+                    sb.AppendLine("   Fix: " + it.fix);
+                }
+            }
+            return sb.ToString();
         }
 
         // ---------- Results rendering (Summary + Details pages) ----------
@@ -824,13 +959,35 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             }
         }
 
+        // ---------- Busy state / elapsed timer ----------
         void SetBusy(bool busy)
         {
             _busy = busy;
-            if (_captureBtn != null) { _captureBtn.SetEnabled(!busy); _captureBtn.text = busy ? "Working..." : "Capture frame"; }
-            if (_inspectBtn != null) _inspectBtn.SetEnabled(!busy);
+            if (_captureBtn != null) _captureBtn.text = busy ? "Working..." : "Capture frame";
             if (_recheckBtn != null) _recheckBtn.SetEnabled(!busy);
-            UpdateAskAiEnabled();
+            if (_cancelBtn != null) _cancelBtn.style.display = busy ? DisplayStyle.Flex : DisplayStyle.None;
+            if (busy) StartElapsed(); else StopElapsed();
+            UpdateButtons();
+        }
+
+        void StartElapsed()
+        {
+            _busyStart = EditorApplication.timeSinceStartup;
+            UpdateElapsed();
+            _busyTicker = rootVisualElement.schedule.Execute(UpdateElapsed).Every(500);
+        }
+
+        void StopElapsed()
+        {
+            if (_busyTicker != null) { _busyTicker.Pause(); _busyTicker = null; }
+            if (_elapsedLabel != null) _elapsedLabel.text = string.Empty;
+        }
+
+        void UpdateElapsed()
+        {
+            if (_elapsedLabel == null) return;
+            double secs = EditorApplication.timeSinceStartup - _busyStart;
+            _elapsedLabel.text = string.Format(CultureInfo.InvariantCulture, "⏱ {0:F0}s", secs);
         }
 
         // ---------- Log helpers ----------
@@ -841,7 +998,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (string.IsNullOrEmpty(msg)) return;
             // onLog fires from background threads (ProcessRunner). Marshal UI updates to the main
             // thread — touching the UI Toolkit scheduler off-main throws (get_timeSinceStartup).
-            if (_mainCtx != null && _mainCtx != System.Threading.SynchronizationContext.Current)
+            if (_mainCtx != null && _mainCtx != SynchronizationContext.Current)
                 _mainCtx.Post(_ => AppendLogMain(msg), null);
             else
                 AppendLogMain(msg);
