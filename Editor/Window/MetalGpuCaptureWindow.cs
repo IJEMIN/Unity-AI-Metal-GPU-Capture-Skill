@@ -23,6 +23,14 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         const string AssistantMenuItem = "Window/AI/Assistant";
         static readonly string[] TabNames = { "Summary", "Capture", "Details", "Log" };
 
+        const string PrefTrace = "MetalGpuCapture.LastTracePath";
+        const string PrefCaptureDir = "MetalGpuCapture.CaptureDir";
+        const string PrefFps = "MetalGpuCapture.TargetFps";
+        const string PrefLoadTiming = "MetalGpuCapture.LoadTiming";
+        const string PrefClassify = "MetalGpuCapture.ClassifyBottlenecks";
+
+        System.Threading.SynchronizationContext _mainCtx;
+
         // Tabs
         Button[] _tabButtons;
         VisualElement[] _pages;
@@ -34,6 +42,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         RadioButtonGroup _buildMode;
         IntegerField _warmup;
         Toggle _waitSignal;
+        TextField _captureDirField;
         Button _captureBtn;
         Button _recheckBtn;
         TextField _traceField;
@@ -67,6 +76,8 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
         void CreateGUI()
         {
+            _mainCtx = System.Threading.SynchronizationContext.Current;
+
             VisualElement root = rootVisualElement;
             root.style.paddingLeft = 8; root.style.paddingRight = 8;
             root.style.paddingTop = 8; root.style.paddingBottom = 8;
@@ -150,6 +161,16 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _waitSignal.tooltip = "Sets MTLCAPTURE_WAIT_FOR_SIGNAL=1 for players that exit too quickly to attach.";
             pageCapture.Add(_waitSignal);
 
+            _captureDirField = new TextField("Capture folder") { value = EditorPrefs.GetString(PrefCaptureDir, string.Empty) };
+            _captureDirField.tooltip = "Where .gputrace files are saved. Blank = the package's Captures/ folder.";
+            _captureDirField.style.marginTop = 4;
+            _captureDirField.RegisterValueChangedCallback(e => EditorPrefs.SetString(PrefCaptureDir, e.newValue));
+            pageCapture.Add(_captureDirField);
+
+            Button browseDirBtn = new Button(OnBrowseCaptureDir) { text = "Choose capture folder…" };
+            browseDirBtn.style.marginTop = 2;
+            pageCapture.Add(browseDirBtn);
+
             _captureBtn = new Button(OnCaptureClicked) { text = "Capture frame" };
             _captureBtn.style.marginTop = 6;
             _captureBtn.style.height = 26;
@@ -158,9 +179,9 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             pageCapture.Add(Separator());
             pageCapture.Add(SectionLabel("Trace"));
 
-            _traceField = new TextField(".gputrace path");
+            _traceField = new TextField(".gputrace path") { value = EditorPrefs.GetString(PrefTrace, string.Empty) };
             _traceField.style.marginTop = 4;
-            _traceField.RegisterValueChangedCallback(_ => UpdateAskAiEnabled());
+            _traceField.RegisterValueChangedCallback(e => { EditorPrefs.SetString(PrefTrace, e.newValue); UpdateAskAiEnabled(); });
             pageCapture.Add(_traceField);
 
             VisualElement traceBtns = Row();
@@ -176,21 +197,23 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             traceBtns.Add(_xcodeBtn);
             pageCapture.Add(traceBtns);
 
-            _loadTiming = new Toggle("Load GPU timing (profile, ~15-20s)") { value = true };
+            _loadTiming = new Toggle("Load GPU timing (profile, ~15-20s)") { value = EditorPrefs.GetBool(PrefLoadTiming, true) };
             _loadTiming.tooltip = "Runs `gpudebug profile load` to read real GPU frame/pass time. Slower.";
             _loadTiming.style.marginTop = 4;
+            _loadTiming.RegisterValueChangedCallback(e => EditorPrefs.SetBool(PrefLoadTiming, e.newValue));
             pageCapture.Add(_loadTiming);
 
-            _classifyBottlenecks = new Toggle("Classify bottlenecks (GPU counters, +~15-20s)") { value = true };
+            _classifyBottlenecks = new Toggle("Classify bottlenecks (GPU counters, +~15-20s)") { value = EditorPrefs.GetBool(PrefClassify, true) };
             _classifyBottlenecks.tooltip = "Runs `info --all` on the top passes to find the GPU limiter " +
                 "(ALU / texture / fragment-launch / bandwidth). Requires GPU timing; adds another ~15-20s.";
             _classifyBottlenecks.style.marginTop = 2;
+            _classifyBottlenecks.RegisterValueChangedCallback(e => EditorPrefs.SetBool(PrefClassify, e.newValue));
             pageCapture.Add(_classifyBottlenecks);
 
-            _targetFps = new IntegerField("Target frame rate (fps)") { value = 60 };
+            _targetFps = new IntegerField("Target frame rate (fps)") { value = EditorPrefs.GetInt(PrefFps, 60) };
             _targetFps.tooltip = "Used by the frame-budget gauge (60 fps = 16.67 ms, 90 = 11.1, 120 = 8.3).";
             _targetFps.style.marginTop = 2;
-            _targetFps.RegisterValueChangedCallback(_ => { if (_lastSummary != null) ShowResults(_lastSummary); });
+            _targetFps.RegisterValueChangedCallback(e => { EditorPrefs.SetInt(PrefFps, e.newValue); if (_lastSummary != null) ShowResults(_lastSummary); });
             pageCapture.Add(_targetFps);
 
             VisualElement resultBtns = Row();
@@ -336,7 +359,10 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
                 _statusLabel.text = "Capturing...";
                 int warm = Mathf.Max(0, _warmup.value);
-                MetalCaptureResult cap = await MetalCaptureService.CaptureAsync(appPath, warm, _waitSignal.value, AppendLog).ConfigureAwait(true);
+                string outDir = _captureDirField != null ? _captureDirField.value : null;
+                MetalCaptureResult cap = await MetalCaptureService.CaptureAsync(
+                    appPath, warm, _waitSignal.value, AppendLog,
+                    string.IsNullOrEmpty(outDir) ? null : outDir).ConfigureAwait(true);
 
                 if (cap.success)
                 {
@@ -810,9 +836,29 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
         void AppendLog(string msg)
         {
-            if (_logLabel == null || string.IsNullOrEmpty(msg)) return;
+            if (string.IsNullOrEmpty(msg)) return;
+            // onLog fires from background threads (ProcessRunner). Marshal UI updates to the main
+            // thread — touching the UI Toolkit scheduler off-main throws (get_timeSinceStartup).
+            if (_mainCtx != null && _mainCtx != System.Threading.SynchronizationContext.Current)
+                _mainCtx.Post(_ => AppendLogMain(msg), null);
+            else
+                AppendLogMain(msg);
+        }
+
+        void AppendLogMain(string msg)
+        {
+            if (_logLabel == null) return;
             _logLabel.text += (_logLabel.text.Length > 0 ? "\n" : "") + msg;
             _logScroll.schedule.Execute(() => _logScroll.scrollOffset = new Vector2(0, float.MaxValue));
+        }
+
+        void OnBrowseCaptureDir()
+        {
+            string start = (!string.IsNullOrEmpty(_captureDirField.value) && System.IO.Directory.Exists(_captureDirField.value))
+                ? _captureDirField.value : System.IO.Directory.GetCurrentDirectory();
+            string picked = EditorUtility.OpenFolderPanel("Choose capture output folder", start, string.Empty);
+            if (!string.IsNullOrEmpty(picked))
+                _captureDirField.value = picked; // RegisterValueChangedCallback persists it
         }
 
         // ---------- UI builders ----------

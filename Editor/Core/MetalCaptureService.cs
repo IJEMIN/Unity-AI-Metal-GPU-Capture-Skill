@@ -45,6 +45,13 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             return dir;
         }
 
+        /// <summary>Ensures an explicit output directory exists and returns it.</summary>
+        public static string EnsureDir(string dir)
+        {
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
         static string PackageRoot()
         {
             var pkg = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(MetalCaptureService).Assembly);
@@ -72,6 +79,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             int warmupSeconds,
             bool waitForSignal,
             Action<string> onLog = null,
+            string outputDir = null,
             CancellationToken cancellationToken = default)
         {
             var r = new MetalCaptureResult();
@@ -79,9 +87,10 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             void L(string m) { sb.AppendLine(m); onLog?.Invoke(m); }
 
             // Resolve main-thread-only paths BEFORE any ConfigureAwait(false) await.
+            // An explicit outputDir avoids the main-thread-only PackageManager call in CapturesDir().
             string capturesDir;
-            try { capturesDir = CapturesDir(); }
-            catch (Exception e) { r.success = false; r.error = "Cannot resolve Captures dir: " + e.Message; r.log = sb.ToString(); return r; }
+            try { capturesDir = string.IsNullOrEmpty(outputDir) ? CapturesDir() : EnsureDir(outputDir); }
+            catch (Exception e) { r.success = false; r.error = "Cannot resolve capture dir: " + e.Message; r.log = sb.ToString(); return r; }
 
             string exe = ResolveInnerExecutable(appPath, out string err);
             if (exe == null) { r.success = false; r.error = err; r.log = sb.ToString(); return r; }
