@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -9,14 +10,25 @@ using UnityEngine.UIElements;
 namespace JeminLee.MetalGpuCaptureSkill.Editor
 {
     /// <summary>
-    /// Entry point A: human-driven dockable window.
-    /// Step 1 = environment. Step 2 = build + capture. Step 3 = minimal results.
-    /// Step 5 = "Ask AI Assistant for insights" (programmatic AssistantApi + clipboard/menu fallback).
+    /// Entry point A: human-driven dockable window, organized into tabs:
+    ///   Summary  - at-a-glance GPU frame time, budget gauge, Top 3 insights.
+    ///   Capture  - environment checks, build/capture controls, trace input + actions.
+    ///   Details  - full per-category breakdown, top GPU passes, counts, notes.
+    ///   Log      - verbose CLI log.
+    /// Tabs are a simple button-bar + page-swap (no TabView dependency). The status line is
+    /// persistent across tabs. After a capture/inspect the window auto-switches to Summary.
     /// </summary>
     public class MetalGpuCaptureWindow : EditorWindow
     {
         const string AssistantMenuItem = "Window/AI/Assistant";
+        static readonly string[] TabNames = { "Summary", "Capture", "Details", "Log" };
 
+        // Tabs
+        Button[] _tabButtons;
+        VisualElement[] _pages;
+        int _activeTab;
+
+        // Capture page widgets
         VisualElement _envContainer;
         Label _lastBuildLabel;
         RadioButtonGroup _buildMode;
@@ -24,11 +36,18 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         Toggle _waitSignal;
         Button _captureBtn;
         Button _recheckBtn;
-        Label _statusLabel;
         TextField _traceField;
+        Button _browseBtn;
+        Button _xcodeBtn;
+        Toggle _loadTiming;
+        IntegerField _targetFps;
         Button _inspectBtn;
         Button _askAiBtn;
-        VisualElement _resultsContainer;
+
+        // Persistent + result pages
+        Label _statusLabel;
+        VisualElement _summaryContainer;
+        VisualElement _detailsContainer;
         ScrollView _logScroll;
         Label _logLabel;
 
@@ -57,60 +76,115 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             title.style.marginBottom = 6;
             root.Add(title);
 
-            // ---------- Environment ----------
+            // ---------- Tab bar ----------
+            VisualElement tabBar = Row();
+            tabBar.style.marginBottom = 6;
+            _tabButtons = new Button[TabNames.Length];
+            for (int i = 0; i < TabNames.Length; i++)
+            {
+                int idx = i;
+                Button b = new Button(() => SelectTab(idx)) { text = TabNames[i] };
+                b.style.flexGrow = 1;
+                b.style.marginRight = (i < TabNames.Length - 1) ? 2 : 0;
+                _tabButtons[i] = b;
+                tabBar.Add(b);
+            }
+            root.Add(tabBar);
+
+            // ---------- Persistent status ----------
+            _statusLabel = new Label(string.Empty);
+            _statusLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _statusLabel.style.whiteSpace = WhiteSpace.Normal;
+            _statusLabel.style.marginBottom = 6;
+            root.Add(_statusLabel);
+
+            // ---------- Pages ----------
+            ScrollView pageSummary = MakeScrollPage();
+            ScrollView pageCapture = MakeScrollPage();
+            ScrollView pageDetails = MakeScrollPage();
+            ScrollView pageLog = MakeScrollPage();
+            _pages = new VisualElement[] { pageSummary, pageCapture, pageDetails, pageLog };
+            root.Add(pageSummary);
+            root.Add(pageCapture);
+            root.Add(pageDetails);
+            root.Add(pageLog);
+
+            // --- Summary page ---
+            pageSummary.Add(SectionLabel("Summary"));
+            _summaryContainer = new VisualElement();
+            _summaryContainer.style.marginTop = 4;
+            pageSummary.Add(_summaryContainer);
+
+            // --- Capture page ---
             VisualElement envHeader = Row();
             envHeader.style.justifyContent = Justify.SpaceBetween;
             envHeader.style.alignItems = Align.Center;
             envHeader.Add(SectionLabel("Environment"));
             _recheckBtn = new Button(RefreshEnvironment) { text = "Re-check" };
             envHeader.Add(_recheckBtn);
-            root.Add(envHeader);
+            pageCapture.Add(envHeader);
 
             _envContainer = new VisualElement();
             _envContainer.style.marginTop = 4;
-            root.Add(_envContainer);
+            pageCapture.Add(_envContainer);
 
-            root.Add(Separator());
-
-            // ---------- Build / Capture ----------
-            root.Add(SectionLabel("Build & Capture"));
+            pageCapture.Add(Separator());
+            pageCapture.Add(SectionLabel("Build & Capture"));
 
             _lastBuildLabel = new Label();
             _lastBuildLabel.style.whiteSpace = WhiteSpace.Normal;
             _lastBuildLabel.style.marginBottom = 4;
-            root.Add(_lastBuildLabel);
+            pageCapture.Add(_lastBuildLabel);
 
             _buildMode = new RadioButtonGroup(string.Empty,
                 new List<string> { "Reuse last build", "Rebuild (Development, Metal)" });
-            root.Add(_buildMode);
+            pageCapture.Add(_buildMode);
 
             _warmup = new IntegerField("Warm-up (seconds)") { value = 10 };
             _warmup.tooltip = "Time to let the player render a representative frame before capturing.";
             _warmup.style.marginTop = 4;
-            root.Add(_warmup);
+            pageCapture.Add(_warmup);
 
             _waitSignal = new Toggle("Wait for signal (short-lived players)") { value = false };
             _waitSignal.tooltip = "Sets MTLCAPTURE_WAIT_FOR_SIGNAL=1 for players that exit too quickly to attach.";
-            root.Add(_waitSignal);
+            pageCapture.Add(_waitSignal);
 
             _captureBtn = new Button(OnCaptureClicked) { text = "Capture frame" };
             _captureBtn.style.marginTop = 6;
             _captureBtn.style.height = 26;
-            root.Add(_captureBtn);
+            pageCapture.Add(_captureBtn);
 
-            _statusLabel = new Label(string.Empty);
-            _statusLabel.style.marginTop = 4;
-            _statusLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
-            root.Add(_statusLabel);
-
-            root.Add(Separator());
-
-            // ---------- Results ----------
-            root.Add(SectionLabel("Results (minimal v1)"));
+            pageCapture.Add(Separator());
+            pageCapture.Add(SectionLabel("Trace"));
 
             _traceField = new TextField(".gputrace path");
             _traceField.style.marginTop = 4;
-            root.Add(_traceField);
+            _traceField.RegisterValueChangedCallback(_ => UpdateAskAiEnabled());
+            pageCapture.Add(_traceField);
+
+            VisualElement traceBtns = Row();
+            traceBtns.style.marginTop = 4;
+            _browseBtn = new Button(OnBrowseClicked) { text = "Browse…" };
+            _browseBtn.style.flexGrow = 1;
+            _browseBtn.tooltip = "Pick a .gputrace bundle (or paste/type the path in the field).";
+            traceBtns.Add(_browseBtn);
+            _xcodeBtn = new Button(OnOpenInXcodeClicked) { text = "Open in Xcode" };
+            _xcodeBtn.style.flexGrow = 1;
+            _xcodeBtn.style.marginLeft = 4;
+            _xcodeBtn.tooltip = "Open the current .gputrace in Xcode's Metal debugger (convenience only).";
+            traceBtns.Add(_xcodeBtn);
+            pageCapture.Add(traceBtns);
+
+            _loadTiming = new Toggle("Load GPU timing (profile, ~15-20s)") { value = true };
+            _loadTiming.tooltip = "Runs `gpudebug profile load` to read real GPU frame/pass time. Slower.";
+            _loadTiming.style.marginTop = 4;
+            pageCapture.Add(_loadTiming);
+
+            _targetFps = new IntegerField("Target frame rate (fps)") { value = 60 };
+            _targetFps.tooltip = "Used by the frame-budget gauge (60 fps = 16.67 ms, 90 = 11.1, 120 = 8.3).";
+            _targetFps.style.marginTop = 2;
+            _targetFps.RegisterValueChangedCallback(_ => { if (_lastSummary != null) ShowResults(_lastSummary); });
+            pageCapture.Add(_targetFps);
 
             VisualElement resultBtns = Row();
             resultBtns.style.marginTop = 4;
@@ -123,29 +197,51 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             _askAiBtn.style.height = 24;
             _askAiBtn.style.marginLeft = 4;
             resultBtns.Add(_askAiBtn);
-            root.Add(resultBtns);
+            pageCapture.Add(resultBtns);
 
-            _resultsContainer = new VisualElement();
-            _resultsContainer.style.marginTop = 6;
-            root.Add(_resultsContainer);
+            // --- Details page ---
+            pageDetails.Add(SectionLabel("Details"));
+            _detailsContainer = new VisualElement();
+            _detailsContainer.style.marginTop = 4;
+            pageDetails.Add(_detailsContainer);
 
-            root.Add(Separator());
-
-            // ---------- Log ----------
-            Foldout logFold = new Foldout { text = "Log", value = false };
+            // --- Log page ---
+            pageLog.Add(SectionLabel("Log"));
             _logScroll = new ScrollView(ScrollViewMode.Vertical);
-            _logScroll.style.maxHeight = 150;
-            _logScroll.style.minHeight = 50;
+            _logScroll.style.flexGrow = 1;
+            _logScroll.style.marginTop = 4;
             _logLabel = new Label(string.Empty);
             _logLabel.style.whiteSpace = WhiteSpace.Normal;
             _logLabel.selection.isSelectable = true;
             _logScroll.Add(_logLabel);
-            logFold.Add(_logScroll);
-            root.Add(logFold);
+            pageLog.Add(_logScroll);
 
+            SelectTab(0);
             RefreshEnvironment();
             RefreshBuildSection();
+            ShowResults(null);
             UpdateAskAiEnabled();
+        }
+
+        // ---------- Tabs ----------
+        void SelectTab(int idx)
+        {
+            _activeTab = idx;
+            for (int i = 0; i < _pages.Length; i++)
+                _pages[i].style.display = (i == idx) ? DisplayStyle.Flex : DisplayStyle.None;
+            for (int i = 0; i < _tabButtons.Length; i++)
+            {
+                bool active = i == idx;
+                _tabButtons[i].style.unityFontStyleAndWeight = active ? FontStyle.Bold : FontStyle.Normal;
+                _tabButtons[i].style.backgroundColor = active ? new Color(1, 1, 1, 0.12f) : new Color(1, 1, 1, 0.02f);
+            }
+        }
+
+        static ScrollView MakeScrollPage()
+        {
+            ScrollView sv = new ScrollView(ScrollViewMode.Vertical);
+            sv.style.flexGrow = 1;
+            return sv;
         }
 
         // ---------- Environment ----------
@@ -175,7 +271,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
         {
             VisualElement row = Row();
             row.style.marginBottom = 2;
-            Label icon = new Label(check.pass ? "\u2705" : "\u274C");
+            Label icon = new Label(check.pass ? "✅" : "❌");
             icon.style.width = 22;
             row.Add(icon);
             Label text = new Label(check.label + "  -  " + check.detail);
@@ -264,12 +360,14 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
 
         async Task InspectAndShow(string tracePath)
         {
-            _statusLabel.text = "Inspecting trace...";
-            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog).ConfigureAwait(true);
+            bool timing = _loadTiming != null && _loadTiming.value;
+            _statusLabel.text = timing ? "Inspecting + loading GPU timing (~15-20s)..." : "Inspecting trace...";
+            MetalTraceSummary sum = await MetalTraceInspector.InspectAsync(tracePath, AppendLog, timing).ConfigureAwait(true);
             _lastSummary = sum;
             ShowResults(sum);
             UpdateAskAiEnabled();
             _statusLabel.text = sum.success ? "Inspection complete." : ("Inspection failed: " + sum.error);
+            if (sum.success) SelectTab(0); // jump to Summary
         }
 
         // ---------- Ask AI Assistant ----------
@@ -335,60 +433,185 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             if (s != null && s.success)
             {
                 sb.AppendLine();
-                sb.AppendLine(string.Format(
+                sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
                     "Known summary: device {0}; {1} command buffers, {2} encoders, {3} draw calls.",
                     s.device, s.commandBufferCount, s.encoderCount, s.drawCallCount));
-                if (s.topPass != null)
+                if (s.gpuFrameTimeAvailable)
+                    sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "GPU frame time: {0:F2} ms.", s.gpuFrameMs));
+                if (s.gpuTimingLoaded && s.gpuPasses.Count > 0)
+                {
+                    sb.AppendLine("Top GPU passes by GPU time:");
+                    int n = Mathf.Min(5, s.gpuPasses.Count);
+                    for (int i = 0; i < n; i++)
+                    {
+                        MetalPassInfo p = s.gpuPasses[i];
+                        sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
+                            "  - {0}: {1:F2} ms ({2:F1}%)", p.label, p.gpuMs, p.costPercent));
+                    }
+                }
+                else if (s.topPass != null)
+                {
                     sb.AppendLine(string.Format("Top pass by draw count: {0} ({1} draws).", s.topPass.label, s.topPass.drawCount));
-                sb.AppendLine("Note: gpudebug v1.0 exposes no per-pass GPU timing; reason about cost from draw counts plus URP pass/shader/material context, not measured milliseconds.");
+                }
+                sb.AppendLine("CPU frame time is not in a GPU trace; use Unity FrameTimingManager for CPU.");
             }
             return sb.ToString();
         }
 
         void UpdateAskAiEnabled()
         {
-            if (_askAiBtn == null) return;
-            _askAiBtn.SetEnabled(!_busy && !string.IsNullOrEmpty(_traceField != null ? _traceField.value : null));
+            bool hasTrace = !string.IsNullOrEmpty(_traceField != null ? _traceField.value : null);
+            if (_askAiBtn != null) _askAiBtn.SetEnabled(!_busy && hasTrace);
+            if (_xcodeBtn != null) _xcodeBtn.SetEnabled(hasTrace);
         }
 
-        void ShowResults(MetalTraceSummary s)
+        // ---------- Browse / Open in Xcode ----------
+        void OnBrowseClicked()
         {
-            _resultsContainer.Clear();
-            if (s == null) return;
-            if (!s.success)
+            string start = GetBrowseStartDir();
+            // .gputrace is a macOS bundle directory: OpenFilePanel selects it when it's registered as
+            // a package; otherwise fall back to a folder picker.
+            string picked = EditorUtility.OpenFilePanel("Select .gputrace", start, "gputrace");
+            if (string.IsNullOrEmpty(picked))
+                picked = EditorUtility.OpenFolderPanel("Select .gputrace bundle", start, string.Empty);
+            if (!string.IsNullOrEmpty(picked))
             {
-                _resultsContainer.Add(new Label("Error: " + s.error));
+                _traceField.value = picked;
+                UpdateAskAiEnabled();
+            }
+        }
+
+        void OnOpenInXcodeClicked()
+        {
+            string path = _traceField != null ? _traceField.value : null;
+            if (string.IsNullOrEmpty(path) || !(System.IO.File.Exists(path) || System.IO.Directory.Exists(path)))
+            {
+                _statusLabel.text = "No valid .gputrace to open. Set a path first.";
                 return;
             }
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "/usr/bin/open",
+                    Arguments = "-a Xcode \"" + path + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+                AppendLog("Opening in Xcode: " + path);
+                _statusLabel.text = "Opening in Xcode…";
+            }
+            catch (Exception e)
+            {
+                _statusLabel.text = "Could not open Xcode: " + e.Message;
+                AppendLog("open -a Xcode failed: " + e.Message + " (is Xcode installed?)");
+            }
+        }
 
-            _resultsContainer.Add(KV("Device", s.device));
-            _resultsContainer.Add(KV("Command buffers / encoders / draws",
+        string GetBrowseStartDir()
+        {
+            string cur = _traceField != null ? _traceField.value : null;
+            if (!string.IsNullOrEmpty(cur))
+            {
+                try
+                {
+                    string d = System.IO.Path.GetDirectoryName(cur);
+                    if (!string.IsNullOrEmpty(d) && System.IO.Directory.Exists(d)) return d;
+                }
+                catch { }
+            }
+            return System.IO.Directory.GetCurrentDirectory();
+        }
+
+        // ---------- Results rendering (Summary + Details pages) ----------
+        void ShowResults(MetalTraceSummary s)
+        {
+            ShowSummary(s);
+            ShowDetails(s);
+        }
+
+        void ShowSummary(MetalTraceSummary s)
+        {
+            if (_summaryContainer == null) return;
+            _summaryContainer.Clear();
+
+            if (s == null) { _summaryContainer.Add(Hint("Capture a frame (Capture tab) or inspect a .gputrace to see a summary.")); return; }
+            if (!s.success) { _summaryContainer.Add(new Label("Error: " + s.error)); return; }
+
+            _summaryContainer.Add(KV("Device", s.device));
+            _summaryContainer.Add(KV("Encoders / draws", s.encoderCount + " / " + s.drawCallCount));
+            _summaryContainer.Add(KV("GPU frame time",
+                s.gpuFrameTimeAvailable
+                    ? s.gpuFrameMs.ToString("F2", CultureInfo.InvariantCulture) + " ms"
+                    : "unavailable (enable 'Load GPU timing' on the Capture tab)"));
+
+            if (s.gpuTimingLoaded)
+            {
+                AddBudgetGauge(s, _summaryContainer);
+                AddInsights(s, _summaryContainer);
+            }
+            else
+            {
+                _summaryContainer.Add(Hint(string.IsNullOrEmpty(s.timingNote)
+                    ? "Enable 'Load GPU timing' (Capture tab) for the budget gauge and Top 3 insights."
+                    : s.timingNote));
+            }
+        }
+
+        void ShowDetails(MetalTraceSummary s)
+        {
+            if (_detailsContainer == null) return;
+            _detailsContainer.Clear();
+
+            if (s == null) { _detailsContainer.Add(Hint("No trace inspected yet.")); return; }
+            if (!s.success) { _detailsContainer.Add(new Label("Error: " + s.error)); return; }
+
+            _detailsContainer.Add(KV("Device", s.device));
+            _detailsContainer.Add(KV("Command buffers / encoders / draws",
                 s.commandBufferCount + " / " + s.encoderCount + " / " + s.drawCallCount));
+            _detailsContainer.Add(KV("CPU frame time",
+                s.cpuFrameTimeAvailable ? s.cpuFrameMs.ToString("F2", CultureInfo.InvariantCulture) + " ms" : "unavailable"));
+            _detailsContainer.Add(KV("GPU frame time",
+                s.gpuFrameTimeAvailable ? s.gpuFrameMs.ToString("F2", CultureInfo.InvariantCulture) + " ms" : "unavailable"));
 
-            _resultsContainer.Add(KV("CPU frame time",
-                s.cpuFrameTimeAvailable ? s.cpuFrameMs.ToString("F2") + " ms" : "unavailable"));
-            _resultsContainer.Add(KV("GPU frame time",
-                s.gpuFrameTimeAvailable ? s.gpuFrameMs.ToString("F2") + " ms" : "unavailable"));
+            if (s.gpuTimingLoaded)
+                AddBreakdown(s, _detailsContainer);
 
-            if (s.topPass != null)
+            if (s.gpuTimingLoaded && s.gpuPasses != null && s.gpuPasses.Count > 0)
+            {
+                Label h = new Label("Top GPU passes (by GPU time):");
+                h.style.unityFontStyleAndWeight = FontStyle.Bold;
+                h.style.marginTop = 8;
+                _detailsContainer.Add(h);
+                int n = Mathf.Min(8, s.gpuPasses.Count);
+                for (int i = 0; i < n; i++)
+                {
+                    MetalPassInfo p = s.gpuPasses[i];
+                    Label row = new Label(string.Format(CultureInfo.InvariantCulture,
+                        "    {0}. {1}  -  {2:F2} ms ({3:F1}%)", i + 1, p.label, p.gpuMs, p.costPercent));
+                    row.style.whiteSpace = WhiteSpace.Normal;
+                    _detailsContainer.Add(row);
+                }
+            }
+            else if (s.topPass != null)
             {
                 Label tp = new Label("Top GPU pass (by " + s.topPassMetric + "):");
                 tp.style.unityFontStyleAndWeight = FontStyle.Bold;
-                tp.style.marginTop = 6;
-                _resultsContainer.Add(tp);
+                tp.style.marginTop = 8;
+                _detailsContainer.Add(tp);
                 Label tpv = new Label("    " + s.topPass.label + "  -  " + s.topPass.drawCount + " draws");
                 tpv.style.whiteSpace = WhiteSpace.Normal;
-                _resultsContainer.Add(tpv);
+                _detailsContainer.Add(tpv);
             }
 
             if (!string.IsNullOrEmpty(s.timingNote))
             {
                 Label note = new Label("Note: " + s.timingNote);
                 note.style.whiteSpace = WhiteSpace.Normal;
-                note.style.marginTop = 6;
+                note.style.marginTop = 8;
                 note.style.fontSize = 11;
                 note.style.color = new Color(0.7f, 0.7f, 0.7f);
-                _resultsContainer.Add(note);
+                _detailsContainer.Add(note);
             }
             if (s.passesCapped)
             {
@@ -397,7 +620,7 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
                 cap.style.whiteSpace = WhiteSpace.Normal;
                 cap.style.fontSize = 11;
                 cap.style.color = new Color(0.7f, 0.7f, 0.7f);
-                _resultsContainer.Add(cap);
+                _detailsContainer.Add(cap);
             }
         }
 
@@ -414,6 +637,142 @@ namespace JeminLee.MetalGpuCaptureSkill.Editor
             val.style.whiteSpace = WhiteSpace.Normal;
             row.Add(val);
             return row;
+        }
+
+        static Label Hint(string text)
+        {
+            Label l = new Label(text);
+            l.style.whiteSpace = WhiteSpace.Normal;
+            l.style.color = new Color(0.7f, 0.7f, 0.7f);
+            l.style.marginTop = 4;
+            return l;
+        }
+
+        // ---------- Insight UI (frame budget / breakdown / Top 3) ----------
+        void AddBudgetGauge(MetalTraceSummary s, VisualElement c)
+        {
+            int fps = (_targetFps != null && _targetFps.value > 0) ? _targetFps.value : 60;
+            double target = MetalInsights.TargetMs(fps);
+            double frame = s.gpuFrameMs;
+            bool over = frame > target;
+            double delta = Math.Abs(frame - target);
+            double nowFps = frame > 0 ? 1000.0 / frame : 0;
+
+            Label h = new Label(string.Format(CultureInfo.InvariantCulture,
+                "Frame budget @ {0} fps = {1:F2} ms", fps, target));
+            h.style.unityFontStyleAndWeight = FontStyle.Bold;
+            h.style.marginTop = 6;
+            c.Add(h);
+
+            // Bar fills to 50% at target, 100% at 2x target.
+            float frac = target > 0 ? (float)Math.Min(frame / target, 2.0) / 2f : 0f;
+            VisualElement track = new VisualElement();
+            track.style.height = 16;
+            track.style.marginTop = 2;
+            track.style.backgroundColor = new Color(1, 1, 1, 0.08f);
+            VisualElement fill = new VisualElement();
+            fill.style.height = 16;
+            fill.style.width = Length.Percent(frac * 100f);
+            fill.style.backgroundColor = over ? new Color(0.85f, 0.45f, 0.30f) : new Color(0.40f, 0.75f, 0.45f);
+            track.Add(fill);
+            c.Add(track);
+
+            Label verdict = new Label(over
+                ? string.Format(CultureInfo.InvariantCulture,
+                    "OVER budget by {0:F2} ms (≈ {1:F0} fps now). Cut {0:F2} ms to hit {2} fps.", delta, nowFps, fps)
+                : string.Format(CultureInfo.InvariantCulture,
+                    "Within budget — {0:F2} ms headroom (≈ {1:F0} fps now).", delta, nowFps));
+            verdict.style.whiteSpace = WhiteSpace.Normal;
+            verdict.style.marginTop = 2;
+            verdict.style.color = over ? new Color(0.90f, 0.60f, 0.30f) : new Color(0.50f, 0.80f, 0.50f);
+            c.Add(verdict);
+        }
+
+        void AddBreakdown(MetalTraceSummary s, VisualElement c)
+        {
+            List<CategoryCost> bd = MetalInsights.Breakdown(s);
+            if (bd.Count == 0) return;
+
+            Label h = new Label("GPU time by category");
+            h.style.unityFontStyleAndWeight = FontStyle.Bold;
+            h.style.marginTop = 8;
+            c.Add(h);
+
+            int shown = Mathf.Min(10, bd.Count);
+            for (int i = 0; i < shown; i++)
+            {
+                CategoryCost cc = bd[i];
+                VisualElement row = Row();
+                row.style.alignItems = Align.Center;
+                row.style.marginBottom = 1;
+
+                Label name = new Label(cc.category);
+                name.style.width = 200;
+                name.style.whiteSpace = WhiteSpace.Normal;
+                row.Add(name);
+
+                VisualElement track = new VisualElement();
+                track.style.flexGrow = 1;
+                track.style.height = 12;
+                track.style.backgroundColor = new Color(1, 1, 1, 0.06f);
+                VisualElement fill = new VisualElement();
+                fill.style.height = 12;
+                fill.style.width = Length.Percent((float)Math.Min(cc.percent, 100.0));
+                fill.style.backgroundColor = new Color(0.40f, 0.60f, 0.85f);
+                track.Add(fill);
+                row.Add(track);
+
+                Label val = new Label(string.Format(CultureInfo.InvariantCulture, "  {0:F2} ms ({1:F0}%)", cc.ms, cc.percent));
+                val.style.width = 110;
+                row.Add(val);
+                c.Add(row);
+            }
+        }
+
+        void AddInsights(MetalTraceSummary s, VisualElement c)
+        {
+            List<MetalInsight> ins = MetalInsights.TopInsights(s, 3);
+
+            Label h = new Label("Top 3 optimization insights");
+            h.style.unityFontStyleAndWeight = FontStyle.Bold;
+            h.style.marginTop = 10;
+            c.Add(h);
+
+            if (ins.Count == 0)
+            {
+                c.Add(Hint("No high-impact issues detected from measured pass costs."));
+                return;
+            }
+
+            for (int i = 0; i < ins.Count; i++)
+            {
+                MetalInsight it = ins[i];
+                VisualElement card = new VisualElement();
+                card.style.marginTop = 4;
+                card.style.paddingLeft = 8; card.style.paddingRight = 8;
+                card.style.paddingTop = 6; card.style.paddingBottom = 6;
+                card.style.backgroundColor = new Color(1, 1, 1, 0.05f);
+                card.style.borderTopLeftRadius = 4; card.style.borderTopRightRadius = 4;
+                card.style.borderBottomLeftRadius = 4; card.style.borderBottomRightRadius = 4;
+
+                Label t = new Label(string.Format(CultureInfo.InvariantCulture,
+                    "{0}. {1}{2}", i + 1, it.title, it.quickWin ? "  [quick win]" : string.Empty));
+                t.style.unityFontStyleAndWeight = FontStyle.Bold;
+                t.style.whiteSpace = WhiteSpace.Normal;
+                card.Add(t);
+
+                Label ev = new Label("Evidence: " + it.evidence);
+                ev.style.whiteSpace = WhiteSpace.Normal;
+                ev.style.fontSize = 11;
+                ev.style.color = new Color(0.75f, 0.75f, 0.75f);
+                card.Add(ev);
+
+                Label fx = new Label("Fix: " + it.fix);
+                fx.style.whiteSpace = WhiteSpace.Normal;
+                card.Add(fx);
+
+                c.Add(card);
+            }
         }
 
         void SetBusy(bool busy)
