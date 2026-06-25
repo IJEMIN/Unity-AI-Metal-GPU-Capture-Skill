@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breakdown, deterministic Top-3 insights, and per-pass GPU bottleneck classification (perf limiters).
 - Tabbed window (Summary / Capture / Details / Log) with Browse… and Open-in-Xcode buttons.
 - Configurable capture output folder; the last `.gputrace` path and settings persist via `EditorPrefs`.
-- README usage guide + window mockup.
+- README usage guide + window screenshots (Summary / Capture / Details / Log).
 
 ### Fixed
 - `get_timeSinceStartup` error on Inspect: log callbacks from background threads now marshal to the

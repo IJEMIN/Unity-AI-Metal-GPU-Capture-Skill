@@ -10,11 +10,10 @@ interprets it in **URP project context** — driven entirely from the Editor via
 - **B) Unity AI Assistant skills + `[McpTool]` tools** — so the in-Editor Assistant can capture and
   interpret traces directly, or you can hand it the current data with one button.
 
-![Metal GPU Capture — Summary tab](Documentation~/images/metal-gpu-capture-summary.svg)
+![Metal GPU Capture — Summary tab](Documentation~/images/metal-gpu-capture-summary.png)
 
-> The image above is a **representative mockup** (real numbers from an Apple M3 Pro URP capture).
-> To use a real screenshot: open the window in Unity, capture it (macOS `⇧⌘4`, or Unity's window),
-> save it as `Documentation~/images/metal-gpu-capture.png`, and update the link above.
+*Summary tab on an Apple M3 Pro URP capture: 31.10 ms GPU frame, over the 60 fps budget, with the Top 3
+insights.*
 
 ## Requirements
 
@@ -60,6 +59,18 @@ all of them, and the window jumps to **Summary** after a capture/inspect.
 - **Details** — CPU/GPU frame time, counts, **GPU time by category**, and the **top GPU passes** with
   their per-pass bottleneck (e.g. `↳ Fragment-shader-launch bound [Fragment Shader Launch 91%, …]`).
 - **Log** — verbose `gpucapture` / `gpudebug` output.
+
+**Capture tab** — environment checks, build/capture, capture folder, and trace input + actions:
+
+![Capture tab](Documentation~/images/metal-gpu-capture-capture.png)
+
+**Details tab** — GPU time by category and the top GPU passes with their per-pass bottleneck:
+
+![Details tab](Documentation~/images/metal-gpu-capture-details.png)
+
+**Log tab** — the `gpucapture` / `gpudebug` commands that ran:
+
+![Log tab](Documentation~/images/metal-gpu-capture-log.png)
 
 > Loading GPU timing runs `gpudebug profile load` (~15–20 s); classifying bottlenecks adds another
 > ~15–20 s. Turn either off for a fast structural inspect (counts + passes only). Settings (last
